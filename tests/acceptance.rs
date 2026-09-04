@@ -116,6 +116,33 @@ fn search_graph_and_pack_match_acceptance_contract() {
 }
 
 #[test]
+fn pack_preserves_requested_definitions_before_long_bodies_and_relations() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let mut source = String::new();
+    for name in ["alpha", "beta", "gamma", "delta"] {
+        source.push_str(&format!(
+            "def {name}():\n    \"\"\"{}\"\"\"\n    return 1\n\n",
+            "documentation ".repeat(180)
+        ));
+    }
+    fs::write(root.join("long.py"), source).unwrap();
+    index_repository(root).unwrap();
+    let pack = pack_query("alpha beta gamma delta", 800, "explore", root).unwrap();
+    for name in ["alpha", "beta", "gamma", "delta"] {
+        assert!(
+            pack.hits
+                .iter()
+                .any(|hit| hit.symbol.as_deref() == Some(name)),
+            "missing {name}"
+        );
+    }
+    assert!(pack.tokens <= 800);
+    assert_eq!(pack.coverage, "partial");
+    assert!(!pack.hint.unwrap().starts_with("answer-ready:"));
+}
+
+#[test]
 fn map_and_briefing_only_reference_real_paths_and_skip_clean_snapshot() {
     let (_temporary, root) = fixture();
     index_repository(&root).unwrap();

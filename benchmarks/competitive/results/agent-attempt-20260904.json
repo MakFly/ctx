@@ -1,0 +1,208 @@
+{
+  "schema": 1,
+  "generated_at": "2026-09-04T19:04:28.406911+00:00",
+  "runner": {
+    "version": "codex-cli 0.153.1",
+    "model": "gpt-5.6-luna",
+    "effort": "high"
+  },
+  "ctx_sha256": "eb51fd4d5fba4bfd9365668ebd03c3c1405a340900344e802f81773f1a85bec5",
+  "manifest_sha256": "9dde9060e4dfb60d2ae973f8403a29b34765204bfd5ad0f940fb088fb3bf2d06",
+  "runner_sha256": "70f477f61e592f2cce115643d7fac25495699c2dcb44e469d447892865f4e24e",
+  "platform": "Linux-7.0.0-30-generic-x86_64-inconnu-with-glibc2.43",
+  "methodology": {
+    "order": "alternate shell/ctx first by repository",
+    "runs_per_pair": 1,
+    "indexing_excluded_from_agent_wall_time": true,
+    "mcp_runtime_network": false,
+    "mcp_source_read_only": true,
+    "mcp_result_json_bytes": "compact UTF-8 serialization of the complete result, not token count",
+    "scoring": "exact definition citations only; prose/call relationships not graded",
+    "shell_constraint": "prompt constraint plus read-only Codex sandbox; calls recorded for review"
+  },
+  "repositories": [
+    {
+      "id": "requests",
+      "commit": "dae7ef63b4df6eded86637f251fc4e3a06c3b479",
+      "variant": "shell",
+      "status": "completed",
+      "exit_code": 0,
+      "elapsed_seconds": 48.001382536000165,
+      "input_tokens": 79616,
+      "cached_input_tokens": 57088,
+      "output_tokens": 1823,
+      "reasoning_output_tokens": 819,
+      "uncached_input_tokens": 22528,
+      "tool_calls": 10,
+      "mcp_calls": 0,
+      "mcp_result_json_bytes": 0,
+      "protocol_violations": [],
+      "errors": [],
+      "completed": true,
+      "score": {
+        "passed": 4,
+        "total": 4,
+        "facts": [
+          {
+            "symbol": "get",
+            "path": "src/requests/api.py",
+            "line": 74,
+            "path_found": true,
+            "symbol_found": true,
+            "citation_found": true,
+            "passed": true
+          },
+          {
+            "symbol": "request",
+            "path": "src/requests/api.py",
+            "line": 24,
+            "path_found": true,
+            "symbol_found": true,
+            "citation_found": true,
+            "passed": true
+          },
+          {
+            "symbol": "Session.request",
+            "path": "src/requests/sessions.py",
+            "line": 557,
+            "path_found": true,
+            "symbol_found": true,
+            "citation_found": true,
+            "passed": true
+          },
+          {
+            "symbol": "HTTPAdapter.send",
+            "path": "src/requests/adapters.py",
+            "line": 634,
+            "path_found": true,
+            "symbol_found": true,
+            "citation_found": true,
+            "passed": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "requests",
+      "commit": "dae7ef63b4df6eded86637f251fc4e3a06c3b479",
+      "variant": "ctx",
+      "status": "failed",
+      "exit_code": 1,
+      "elapsed_seconds": 29.62184407899622,
+      "input_tokens": null,
+      "cached_input_tokens": null,
+      "output_tokens": null,
+      "reasoning_output_tokens": null,
+      "uncached_input_tokens": null,
+      "tool_calls": 3,
+      "mcp_calls": 3,
+      "mcp_result_json_bytes": 2697,
+      "protocol_violations": [],
+      "errors": [
+        {
+          "type": "error",
+          "message": "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 11th, 2026 10:06 AM."
+        },
+        {
+          "type": "turn.failed",
+          "error": {
+            "message": "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 11th, 2026 10:06 AM."
+          }
+        }
+      ],
+      "completed": false,
+      "score": {
+        "passed": 0,
+        "total": 4,
+        "facts": [
+          {
+            "symbol": "get",
+            "path": "src/requests/api.py",
+            "line": 74,
+            "path_found": false,
+            "symbol_found": false,
+            "citation_found": false,
+            "passed": false
+          },
+          {
+            "symbol": "request",
+            "path": "src/requests/api.py",
+            "line": 24,
+            "path_found": false,
+            "symbol_found": false,
+            "citation_found": false,
+            "passed": false
+          },
+          {
+            "symbol": "Session.request",
+            "path": "src/requests/sessions.py",
+            "line": 557,
+            "path_found": false,
+            "symbol_found": false,
+            "citation_found": false,
+            "passed": false
+          },
+          {
+            "symbol": "HTTPAdapter.send",
+            "path": "src/requests/adapters.py",
+            "line": 634,
+            "path_found": false,
+            "symbol_found": false,
+            "citation_found": false,
+            "passed": false
+          }
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "shell": {
+      "completed_repositories": 1,
+      "facts_passed": 4,
+      "facts_total": 4,
+      "elapsed_seconds": {
+        "median": 48.001382536000165,
+        "p95": 48.001382536000165
+      },
+      "input_tokens": {
+        "median": 79616,
+        "p95": 79616
+      },
+      "cached_input_tokens": {
+        "median": 57088,
+        "p95": 57088
+      },
+      "uncached_input_tokens": {
+        "median": 22528,
+        "p95": 22528
+      },
+      "output_tokens": {
+        "median": 1823,
+        "p95": 1823
+      },
+      "tool_calls": {
+        "median": 10,
+        "p95": 10
+      },
+      "mcp_result_json_bytes": {
+        "median": 0,
+        "p95": 0
+      }
+    },
+    "ctx": {
+      "completed_repositories": 0,
+      "facts_passed": 0,
+      "facts_total": 0
+    },
+    "paired": {
+      "repositories": 0,
+      "median_delta_percent": {}
+    }
+  },
+  "status": "incomplete",
+  "limitations": [
+    "Only Requests shell baseline completed. No completed pair and no competitor ranking.",
+    "Requests ctx failed after MCP transport errors and an explicit Codex CLI usage-limit response. Its empty answer is not a retrieval accuracy measurement.",
+    "Competitor builds were not run: current user instructions prohibit builds without explicit authorization in the current message."
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "scope": "Synthetic four long Python functions; coverage only, not runtime speed or model tokens",
+  "results": [
+    {
+      "version": "before",
+      "symbols": [
+        "alpha"
+      ],
+      "tokens_estimate": 503,
+      "coverage": "partial",
+      "hint": "answer-ready: exact definitions, callers, and callees are included; cite each hit's path:start-end from why exactly, and do not call another retrieval tool unless a requested fact is absent"
+    },
+    {
+      "version": "after",
+      "symbols": [
+        "alpha",
+        "beta",
+        "gamma",
+        "delta"
+      ],
+      "tokens_estimate": 800,
+      "coverage": "partial",
+      "hint": "partial context: budget omitted or shortened evidence; cite the returned spans and retrieve any missing requested facts"
+    }
+  ]
+}

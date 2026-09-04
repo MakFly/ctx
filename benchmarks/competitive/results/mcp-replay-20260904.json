@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "diagnostic": "Replay of all three Requests ctx_pack arguments from the failed agent run, in order, in one MCP session using the exact saved bwrap command. No model call.",
+  "responses": [
+    {
+      "id": 1,
+      "jsonrpc_error": null,
+      "tool_error": false
+    },
+    {
+      "id": 2,
+      "jsonrpc_error": null,
+      "tool_error": false
+    },
+    {
+      "id": 3,
+      "jsonrpc_error": null,
+      "tool_error": false
+    },
+    {
+      "id": 4,
+      "jsonrpc_error": null,
+      "tool_error": false
+    }
+  ],
+  "process_exit_code": 0,
+  "stderr": "",
+  "raw_response_sha256": "d96c878317d02557b3046975f387f6ed206eee83f1d6a7378300b7307f967b0d",
+  "conclusion": "Transport failure not reproduced. This does not establish its cause or complete an agent benchmark."
+}

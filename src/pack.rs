@@ -7,7 +7,7 @@ use regex::Regex;
 
 use crate::graph::graph_query;
 use crate::model::{Envelope, Hit};
-use crate::search::{apply_budget, search_index};
+use crate::search::{apply_budget, estimate_tokens, search_index};
 
 pub fn pack_query(
     query: &str,
@@ -20,6 +20,7 @@ pub fn pack_query(
     let exact = exact_symbols(query, start)?;
     if !exact.is_empty() {
         let mut hits = Vec::new();
+        let mut relations = Vec::new();
         for (name, mut definitions) in exact {
             for hit in &mut definitions {
                 set_why(hit, "definition", &name);
@@ -30,10 +31,41 @@ pub fn pack_query(
                 for hit in &mut related {
                     set_why(hit, relation_name(operation), &name);
                 }
-                hits.extend(related);
+                relations.extend(related);
             }
         }
-        return Ok(apply_budget(
+        let mut hits = unique_hits(hits);
+        // Reserve space for every requested definition before spending the
+        // budget on any one function body or its graph neighbours.
+        let definitions_cost: usize = hits.iter().map(estimate_tokens).sum();
+        let mut shortened = false;
+        if definitions_cost > budget_tokens {
+            let share = budget_tokens / hits.len().max(1);
+            for hit in &mut hits {
+                if estimate_tokens(hit) > share && !hit.snippet.is_empty() {
+                    let original = std::mem::take(&mut hit.snippet);
+                    let boundaries = original
+                        .char_indices()
+                        .map(|(index, _)| index)
+                        .chain(std::iter::once(original.len()))
+                        .collect::<Vec<_>>();
+                    let (mut low, mut high) = (0, boundaries.len() - 1);
+                    while low < high {
+                        let middle = (low + high).div_ceil(2);
+                        hit.snippet = original[..boundaries[middle]].to_owned();
+                        if estimate_tokens(hit) <= share {
+                            low = middle;
+                        } else {
+                            high = middle - 1;
+                        }
+                    }
+                    hit.snippet = original[..boundaries[low]].to_owned();
+                    shortened |= hit.snippet.len() < original.len();
+                }
+            }
+        }
+        hits.extend(relations);
+        let mut envelope = apply_budget(
             unique_hits(hits),
             budget_tokens,
             started,
@@ -42,7 +74,15 @@ pub fn pack_query(
                 "answer-ready: exact definitions, callers, and callees are included; cite each hit's path:start-end from why exactly, and do not call another retrieval tool unless a requested fact is absent"
                     .to_owned(),
             ),
-        ));
+        );
+        if shortened || envelope.coverage != "complete" {
+            envelope.coverage = "partial".to_owned();
+            envelope.hint = Some(
+                "partial context: budget omitted or shortened evidence; cite the returned spans and retrieve any missing requested facts"
+                    .to_owned(),
+            );
+        }
+        return Ok(envelope);
     }
 
     let search = search_index(query, "auto", None, 10, budget_tokens.max(600), start)?;
