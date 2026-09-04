@@ -158,6 +158,40 @@ The acceptance fixture covers Python, JavaScript/TypeScript, Go, Rust, and PHP,
 including indexing, search, graph traversal, context packing, MCP tools,
 briefing generation, harness installation, and optional LSP orchestration.
 
+## Benchmark
+
+A reproducible synthetic benchmark measures cold indexing, unchanged
+reindexing, search, graph traversal, and context packing on a generated
+Python/TypeScript/Go/Rust/PHP repository:
+
+```console
+uv run python benchmarks/benchmark.py --files 1000 --iterations 100 \
+  --output benchmarks/results/latest.json
+```
+
+See [benchmarks/README.md](benchmarks/README.md) for the methodology and
+[the latest committed result](benchmarks/results/latest.json) for exact
+environment details and percentiles. The included ripgrep number is only a raw
+exact-match baseline; it is not equivalent to a ranked graph-aware context
+pack.
+
+Latest reference snapshot: 1,002 indexed files, 2,201 symbols, Python 3.12.14,
+Linux, 100 measured iterations after 10 warmups.
+
+| Operation | Result |
+|---|---:|
+| Cold index | 178.7 ms / 5,607 files/s |
+| Unchanged reindex | 105.5 ms |
+| Symbol search | 1.03 ms p50 / 1.27 ms p99 |
+| Text search | 1.49 ms p50 / 1.75 ms p99 |
+| Definition graph | 0.61 ms p50 / 0.75 ms p99 |
+| Callers graph | 0.79 ms p50 / 0.84 ms p99 |
+| Context pack | 5.58 ms p50 / 7.58 ms p99 |
+
+These are warm-process synthetic measurements, not guarantees for arbitrary
+repositories. The JSON snapshot records the complete environment and raw
+summary statistics.
+
 ## Project status
 
 `ctx` is an early MVP. Symbol resolution and framework detection are
