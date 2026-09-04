@@ -100,6 +100,10 @@ Individual targets are `claude`, `codex`, `opencode`, and `cursor`.
 Existing JSON and TOML configuration is merged, and repeated installation is
 idempotent.
 
+Codex loads a project-local `.codex/config.toml` only after the project has
+been marked trusted. This trust decision remains user-controlled; `ctx install`
+does not change global Codex trust settings.
+
 Run the MCP server directly with:
 
 ```console

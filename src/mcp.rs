@@ -75,7 +75,13 @@ impl CtxMcp {
 impl CtxMcp {
     #[tool(
         name = "ctx_search",
-        description = "Search code symbols and bounded excerpts."
+        description = "Search code symbols and bounded excerpts.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn ctx_search(
         &self,
@@ -95,7 +101,13 @@ impl CtxMcp {
 
     #[tool(
         name = "ctx_graph",
-        description = "Find definitions, references, callers, callees, paths, or impact."
+        description = "Find definitions, references, callers, callees, paths, or impact.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn ctx_graph(
         &self,
@@ -114,7 +126,13 @@ impl CtxMcp {
 
     #[tool(
         name = "ctx_pack",
-        description = "Build a ranked, bounded context pack."
+        description = "Build a ranked, bounded context pack.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn ctx_pack(
         &self,
@@ -132,7 +150,13 @@ impl CtxMcp {
 
     #[tool(
         name = "ctx_file",
-        description = "Find indexed paths by glob or fuzzy substring."
+        description = "Find indexed paths by glob or fuzzy substring.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     fn ctx_file(
         &self,

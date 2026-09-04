@@ -44,6 +44,13 @@ async fn stdio_server_lists_and_calls_four_tools() -> anyhow::Result<()> {
         .collect::<Vec<_>>();
     names.sort();
     assert_eq!(names, ["ctx_file", "ctx_graph", "ctx_pack", "ctx_search"]);
+    for tool in &tools {
+        let annotations = tool.annotations.as_ref().expect("missing tool annotations");
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(false));
+        assert_eq!(annotations.idempotent_hint, Some(true));
+        assert_eq!(annotations.open_world_hint, Some(false));
+    }
 
     let search = call(&client, "ctx_search", json!({"query": "login"})).await?;
     assert_eq!(search["hits"][0]["path"], "auth.py");
