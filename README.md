@@ -201,6 +201,18 @@ Latest measured release run (2026-09-04, Ryzen 7 3700X, Linux x86_64,
 Raw measurements and the full percentile table are available in
 [`benchmarks/results/latest.json`](benchmarks/results/latest.json).
 
+Agent-level A/B on the ten-file fixture, using Codex CLI 0.153.1 with
+`gpt-5.6-luna` at high reasoning effort (median of three runs):
+
+| Variant | Wall time | Input tokens | Output tokens | Tool calls | Accuracy |
+|---|---:|---:|---:|---:|---:|
+| Optimized `ctx_pack` MCP | 17.26 s | 54,844 | 438 | 1 | 4/4 |
+| Shell search baseline | 20.10 s | 44,080 | 546 | 2 | 4/4 |
+
+The MCP path was 14.1% faster here, while still using 24.4% more total input
+tokens. See [the full A/B methodology and pre-optimization
+result](benchmarks/README.md#codex-exec-ctx-mcp-versus-shell-baseline).
+
 ## Project status
 
 `ctx` is an early MVP. Symbol resolution and framework detection remain

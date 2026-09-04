@@ -79,6 +79,23 @@ async fn stdio_server_lists_and_calls_four_tools() -> anyhow::Result<()> {
             .any(|hit| hit["path"] == "payments.py")
     );
 
+    let one_shot = call(
+        &client,
+        "ctx_pack",
+        json!({
+            "query": "Where is login defined, which function calls login, which database function does login call, and where is retry_payment defined?"
+        }),
+    )
+    .await?;
+    assert!(one_shot["tokens"].as_u64().unwrap() <= 800);
+    assert_eq!(one_shot["coverage"], "complete");
+    assert!(one_shot["hits"].as_array().unwrap().iter().any(|hit| {
+        hit["path"] == "db.py"
+            && hit["why"]
+                .as_str()
+                .is_some_and(|why| why.starts_with("callee of login"))
+    }));
+
     let files = call(&client, "ctx_file", json!({"q": "auth"})).await?;
     assert!(
         files["hits"]

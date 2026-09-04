@@ -77,6 +77,42 @@ fn search_graph_and_pack_match_acceptance_contract() {
     assert!(pack.hits.iter().any(|hit| {
         hit.path == "payments.py" && hit.symbol.as_deref() == Some("retry_payment")
     }));
+
+    let one_shot = pack_query(
+        "Where is login defined, which function calls login, which database function does login call, and where is retry_payment defined?",
+        800,
+        "explore",
+        &root,
+    )
+    .unwrap();
+    assert!(one_shot.tokens <= 800);
+    assert!(
+        one_shot
+            .hint
+            .as_deref()
+            .is_some_and(|hint| hint.starts_with("answer-ready:"))
+    );
+    for (path, symbol, why) in [
+        ("auth.py", "login", "definition of login"),
+        ("app.py", "login_route", "caller of login"),
+        ("db.py", "get_user", "callee of login"),
+        (
+            "payments.py",
+            "retry_payment",
+            "definition of retry_payment",
+        ),
+        ("payments.py", "charge", "callee of retry_payment"),
+    ] {
+        assert!(one_shot.hits.iter().any(|hit| {
+            hit.path == path && hit.symbol.as_deref() == Some(symbol) && hit.why.starts_with(why)
+        }));
+    }
+
+    let punctuated = pack_query("login retry_payment.", 800, "explore", &root).unwrap();
+    assert!(punctuated.hits.iter().any(|hit| {
+        hit.symbol.as_deref() == Some("retry_payment")
+            && hit.why.starts_with("definition of retry_payment")
+    }));
 }
 
 #[test]

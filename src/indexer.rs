@@ -315,10 +315,17 @@ fn upsert_file(connection: &rusqlite::Connection, item: &PreparedFile) -> Result
 fn resolve_edges(connection: &rusqlite::Connection) -> Result<()> {
     connection.execute_batch(
         "UPDATE edges SET dst_symbol_id=NULL WHERE source='parser';
-         UPDATE edges SET dst_symbol_id=(
-           SELECT s.id FROM symbols s JOIN files f ON f.id=s.file_id
-           WHERE s.name=edges.dst_name
-           ORDER BY f.is_test,f.is_vendor,f.path,s.start LIMIT 1
+         UPDATE edges SET dst_symbol_id=COALESCE(
+           (SELECT s.id FROM symbols s
+            WHERE s.name=edges.dst_name AND s.file_id=edges.file_id
+            ORDER BY s.start LIMIT 1),
+           (SELECT s.id FROM symbols s JOIN files f ON f.id=s.file_id
+            WHERE s.name=edges.dst_name
+              AND f.lang=(SELECT src.lang FROM files src WHERE src.id=edges.file_id)
+            ORDER BY f.is_test,f.is_vendor,f.path,s.start LIMIT 1),
+           (SELECT s.id FROM symbols s JOIN files f ON f.id=s.file_id
+            WHERE s.name=edges.dst_name
+            ORDER BY f.is_test,f.is_vendor,f.path,s.start LIMIT 1)
          )
          WHERE source='parser'
            AND EXISTS(SELECT 1 FROM symbols s WHERE s.name=edges.dst_name);",

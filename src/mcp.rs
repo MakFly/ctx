@@ -126,7 +126,7 @@ impl CtxMcp {
 
     #[tool(
         name = "ctx_pack",
-        description = "Build a ranked, bounded context pack.",
+        description = "One-shot code answer pack. Exact symbols include definitions, callers, and callees. Call once and answer immediately when requested facts are present; use another tool only for a missing fact.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -140,7 +140,7 @@ impl CtxMcp {
     ) -> Result<Json<Envelope>, ErrorData> {
         pack_query(
             &request.query,
-            request.budget_tokens,
+            request.budget_tokens.min(800),
             &request.intent,
             &self.root,
         )
@@ -251,7 +251,7 @@ fn default_search_budget() -> usize {
     1_500
 }
 fn default_pack_budget() -> usize {
-    2_000
+    800
 }
 fn default_depth() -> usize {
     2

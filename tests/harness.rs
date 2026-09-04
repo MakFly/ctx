@@ -100,6 +100,9 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
     assert!(codex.contains("model_reasoning_effort = \"high\""));
     assert!(codex.contains("[mcp_servers.ctx]"));
     assert_eq!(codex.matches("[mcp_servers.ctx]").count(), 1);
+    assert!(codex.contains("enabled_tools = [\"ctx_pack\"]"));
+    assert_eq!(codex.matches("[mcp_servers.ctx.tools.ctx_pack]").count(), 1);
+    assert!(codex.contains("output_token_limit = 1200"));
 
     let stale = root.join(".agents/skills/ctx-explore/SKILL.md");
     fs::write(&stale, "stale\n").unwrap();

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-09-04T16:15:25Z",
+  "generated_at": "2026-09-04T16:36:35Z",
   "runner": {
     "name": "codex exec",
     "version": "0.153.1",
@@ -21,13 +21,14 @@
     "paired_runs": 3,
     "same_source_tree": true,
     "same_question": true,
-    "mcp_constraint": "ctx MCP retrieval tools only; no shell or direct file reads",
+    "mcp_constraint": "ctx_pack only; no shell or direct file reads",
     "baseline_constraint": "no MCP or ctx; normal shell search and targeted reads",
     "user_config_ignored": true,
-    "accuracy_checks_per_run": 4
+    "accuracy_checks_per_run": 4,
+    "optimized_configuration": "enabled_tools=[ctx_pack], per-tool output_token_limit=1200, server pack budget clamped to 800, answer-ready pack includes exact definitions/callers/callees"
   },
   "variants": {
-    "ctx_mcp": {
+    "ctx_mcp_before": {
       "runs": [
         {
           "elapsed_seconds": 29.45,
@@ -74,6 +75,53 @@
         "tool_payload_tokens": 1733
       }
     },
+    "ctx_mcp_optimized": {
+      "runs": [
+        {
+          "elapsed_seconds": 18.40,
+          "input_tokens": 54844,
+          "cached_input_tokens": 42240,
+          "uncached_input_tokens": 12604,
+          "output_tokens": 448,
+          "reasoning_output_tokens": 171,
+          "tool_calls": 1,
+          "tool_payload_tokens": 459,
+          "accuracy": "4/4"
+        },
+        {
+          "elapsed_seconds": 17.26,
+          "input_tokens": 44158,
+          "cached_input_tokens": 32000,
+          "uncached_input_tokens": 12158,
+          "output_tokens": 438,
+          "reasoning_output_tokens": 163,
+          "tool_calls": 1,
+          "tool_payload_tokens": 459,
+          "accuracy": "4/4"
+        },
+        {
+          "elapsed_seconds": 16.58,
+          "input_tokens": 54864,
+          "cached_input_tokens": 42240,
+          "uncached_input_tokens": 12624,
+          "output_tokens": 416,
+          "reasoning_output_tokens": 141,
+          "tool_calls": 1,
+          "tool_payload_tokens": 459,
+          "accuracy": "4/4"
+        }
+      ],
+      "median": {
+        "elapsed_seconds": 17.26,
+        "input_tokens": 54844,
+        "cached_input_tokens": 42240,
+        "uncached_input_tokens": 12604,
+        "output_tokens": 438,
+        "reasoning_output_tokens": 163,
+        "tool_calls": 1,
+        "tool_payload_tokens": 459
+      }
+    },
     "shell_baseline": {
       "runs": [
         {
@@ -118,12 +166,22 @@
       }
     }
   },
-  "median_delta_ctx_vs_baseline_percent": {
-    "elapsed_seconds": 57.8,
-    "input_tokens": 171.0,
-    "uncached_input_tokens": 90.0,
-    "output_tokens": 77.3,
-    "reasoning_output_tokens": 152.2
+  "median_delta_optimized_ctx_vs_baseline_percent": {
+    "elapsed_seconds": -14.1,
+    "input_tokens": 24.4,
+    "uncached_input_tokens": 6.7,
+    "output_tokens": -19.8,
+    "reasoning_output_tokens": -21.3,
+    "tool_calls": -50.0
   },
-  "conclusion": "On this ten-file fixture, ctx MCP preserves accuracy but is slower and consumes more tokens because the model uses four to five MCP calls instead of two shell calls. This result should not be extrapolated to large repositories."
+  "median_delta_optimized_vs_previous_ctx_percent": {
+    "elapsed_seconds": -45.6,
+    "input_tokens": -54.1,
+    "uncached_input_tokens": -43.8,
+    "output_tokens": -54.8,
+    "reasoning_output_tokens": -68.8,
+    "tool_calls": -80.0,
+    "tool_payload_tokens": -73.5
+  },
+  "conclusion": "On this ten-file fixture, the optimized one-shot ctx MCP path is 14.1% faster than the shell median and preserves 4/4 accuracy. It uses fewer output and reasoning tokens, but 24.4% more total input tokens and 6.7% more uncached input tokens. This result should not be extrapolated to large repositories."
 }

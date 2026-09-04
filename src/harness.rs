@@ -354,7 +354,10 @@ fn install_codex_mcp(path: &Path) -> Result<()> {
         .position(|line| line.trim() == "[mcp_servers.ctx]")
     {
         let end = (start + 1..lines.len())
-            .find(|index| lines[*index].trim_start().starts_with('['))
+            .find(|index| {
+                let line = lines[*index].trim_start();
+                line.starts_with('[') && !line.starts_with("[mcp_servers.ctx.")
+            })
             .unwrap_or(lines.len());
         lines.drain(start..end);
     }
@@ -362,7 +365,9 @@ fn install_codex_mcp(path: &Path) -> Result<()> {
     if !text.is_empty() {
         text.push_str("\n\n");
     }
-    text.push_str("[mcp_servers.ctx]\ncommand = \"ctx\"\nargs = [\"mcp\"]\nrequired = true\n");
+    text.push_str(
+        "[mcp_servers.ctx]\ncommand = \"ctx\"\nargs = [\"mcp\"]\nrequired = true\nenabled_tools = [\"ctx_pack\"]\n\n[mcp_servers.ctx.tools.ctx_pack]\noutput_token_limit = 1200\n",
+    );
     toml_edit::DocumentMut::from_str(&text)
         .with_context(|| format!("TOML invalide, installation annulée: {}", path.display()))?;
     write(path.to_path_buf(), &text)

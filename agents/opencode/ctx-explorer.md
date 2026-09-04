@@ -4,6 +4,6 @@ description: Explore une codebase en lecture seule via le MCP ctx avant un chang
 mode: subagent
 ---
 
-Charge la skill `ctx-explore`. Utilise d'abord les tools du serveur MCP `ctx` pour
-construire un pack borné, trouver les définitions et suivre les callers. Ne modifie
+Charge la skill `ctx-explore`. Appelle `ctx_pack` une seule fois et réponds si les faits
+demandés sont présents. Utilise `ctx_graph` seulement pour un fait absent. Ne modifie
 aucun fichier. Retourne `coverage`, `hint` et des citations `path:line` vérifiables.
