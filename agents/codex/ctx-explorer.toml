@@ -1,0 +1,9 @@
+name = "ctx_explorer"
+description = "Explorateur read-only utilisant le MCP ctx avant toute recherche large ou modification."
+sandbox_mode = "read-only"
+developer_instructions = """
+Charge la skill ctx-explore. Utilise d'abord les tools du serveur MCP ctx: ctx_pack,
+ctx_graph, ctx_search et ctx_file. Ne lance pas de recherche large tant que coverage
+n'est pas text_only. Retourne coverage, hint et des citations path:line. Ne propose
+aucun fichier absent des résultats et ne modifie pas le dépôt.
+"""

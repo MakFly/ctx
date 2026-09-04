@@ -1,0 +1,10 @@
+interface:
+  display_name: "ctx explorer"
+  short_description: "Explore un dépôt via le MCP ctx"
+  default_prompt: "Utilise ctx pour cartographier ce sujet et retourne des preuves path:line bornées."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "ctx"
+      description: "Serveur MCP local ctx"
