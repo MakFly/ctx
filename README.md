@@ -181,6 +181,22 @@ See [benchmarks/README.md](benchmarks/README.md) for the methodology. The
 command writes the complete environment and percentiles to the requested JSON
 path. Results are synthetic measurements, not guarantees for every repository.
 
+Latest measured release run (2026-09-04, Ryzen 7 3700X, Linux x86_64,
+1,002 indexed files):
+
+| Operation | Result |
+|---|---:|
+| Cold index | 197.07 ms / 5,085 files/s |
+| Unchanged reindex | 38.42 ms |
+| Symbol search p50 / p95 | 1.68 / 1.97 ms |
+| Text search p50 / p95 | 1.21 / 1.34 ms |
+| Definition graph p50 / p95 | 0.55 / 0.77 ms |
+| Callers graph p50 / p95 | 0.60 / 0.63 ms |
+| Context pack p50 / p95 | 4.72 / 5.16 ms |
+
+Raw measurements and the full percentile table are available in
+[`benchmarks/results/latest.json`](benchmarks/results/latest.json).
+
 ## Project status
 
 `ctx` is an early MVP. Symbol resolution and framework detection remain

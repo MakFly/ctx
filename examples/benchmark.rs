@@ -120,8 +120,11 @@ fn main() -> Result<()> {
         },
         "environment": {
             "platform": format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+            "cpu": cpu_model(),
             "rustc": rustc_version(),
+            "sqlite": rusqlite::version(),
             "logical_cpus": std::thread::available_parallelism().map(usize::from).unwrap_or(1),
+            "memory_bytes": total_memory_bytes(),
         },
         "index": {
             "symbols": cold.symbols,
@@ -191,6 +194,38 @@ fn rustc_version() -> String {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn cpu_model() -> String {
+    if let Ok(contents) = fs::read_to_string("/proc/cpuinfo")
+        && let Some(model) = contents.lines().find_map(|line| {
+            line.strip_prefix("model name")
+                .and_then(|value| value.split_once(':'))
+                .map(|(_, value)| value.trim().to_owned())
+        })
+    {
+        return model;
+    }
+    std::process::Command::new("sysctl")
+        .args(["-n", "machdep.cpu.brand_string"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn total_memory_bytes() -> Option<u64> {
+    let contents = fs::read_to_string("/proc/meminfo").ok()?;
+    let kilobytes = contents.lines().find_map(|line| {
+        line.strip_prefix("MemTotal:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    })?;
+    kilobytes.checked_mul(1_024)
 }
 
 fn generate_repository(root: &Path, files: usize) -> Result<(Vec<String>, String)> {

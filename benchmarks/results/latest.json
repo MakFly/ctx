@@ -1,0 +1,82 @@
+{
+  "environment": {
+    "cpu": "AMD Ryzen 7 3700X 8-Core Processor",
+    "logical_cpus": 16,
+    "memory_bytes": 32519434240,
+    "platform": "linux/x86_64",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "sqlite": "3.50.2"
+  },
+  "generated_at": "2026-09-04T15:57:22.775665471+00:00",
+  "index": {
+    "database_bytes": 3321856,
+    "edges": 2601,
+    "symbols": 2001
+  },
+  "methodology": {
+    "filesystem": "temporary directory",
+    "fixture": "generated mixed Python/TypeScript/Go/Rust/PHP repository",
+    "generated_code_files": 1000,
+    "indexed_files": 1002,
+    "iterations": 100,
+    "profile": "release",
+    "source_bytes": 587431,
+    "warmups": 10
+  },
+  "metrics": {
+    "graph_callers": {
+      "max_ms": 0.701,
+      "mean_ms": 0.602,
+      "min_ms": 0.577,
+      "p50_ms": 0.596,
+      "p95_ms": 0.633,
+      "p99_ms": 0.668
+    },
+    "graph_def": {
+      "max_ms": 0.832,
+      "mean_ms": 0.592,
+      "min_ms": 0.53,
+      "p50_ms": 0.55,
+      "p95_ms": 0.772,
+      "p99_ms": 0.817
+    },
+    "index_cold": {
+      "elapsed_ms": 197.069,
+      "files_per_second": 5084.511
+    },
+    "index_unchanged": {
+      "changed_files": 0,
+      "elapsed_ms": 38.421
+    },
+    "pack": {
+      "max_ms": 5.481,
+      "mean_ms": 4.778,
+      "min_ms": 4.589,
+      "p50_ms": 4.724,
+      "p95_ms": 5.158,
+      "p99_ms": 5.26
+    },
+    "search_symbol": {
+      "max_ms": 2.381,
+      "mean_ms": 1.708,
+      "min_ms": 1.536,
+      "p50_ms": 1.683,
+      "p95_ms": 1.97,
+      "p99_ms": 2.258
+    },
+    "search_text": {
+      "max_ms": 1.398,
+      "mean_ms": 1.224,
+      "min_ms": 1.171,
+      "p50_ms": 1.206,
+      "p95_ms": 1.339,
+      "p99_ms": 1.36
+    }
+  },
+  "notes": [
+    "All retrieval measurements are warm-process timings.",
+    "The benchmark calls the same Rust library used by the persistent MCP server.",
+    "Synthetic results do not predict performance on every real repository."
+  ],
+  "schema": 2
+}
