@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "generated_at": "2026-09-04",
+  "competitors": [
+    {
+      "id": "codebase-memory-mcp",
+      "url": "https://github.com/DeusData/codebase-memory-mcp.git",
+      "commit": "ffb5ebe9e8ad2763fc6388c001ca8a16ca834d88",
+      "version": "source snapshot",
+      "license": "MIT",
+      "runtime": "native C binary",
+      "semantic_mode": "disabled for the structural benchmark",
+      "audit_status": "conditionally_allowed"
+    },
+    {
+      "id": "codesearch",
+      "url": "https://github.com/flupkede/codesearch.git",
+      "commit": "4f3cefcb486af2b6b2ebd3e832186028c6b43ae1",
+      "version": "1.3.10",
+      "license": "Apache-2.0",
+      "runtime": "native Rust binary",
+      "semantic_mode": "product default",
+      "audit_status": "conditionally_allowed"
+    },
+    {
+      "id": "serena",
+      "url": "https://github.com/oraios/serena.git",
+      "commit": "13ac8c5b1d51873bd148aea440dcb22f85d3a439",
+      "version": "1.7.1.dev0",
+      "license": "MIT",
+      "runtime": "Python plus language servers",
+      "semantic_mode": "LSP backend",
+      "audit_status": "conditionally_allowed"
+    },
+    {
+      "id": "jcodemunch-mcp",
+      "url": "https://github.com/jgravelle/jcodemunch-mcp.git",
+      "commit": "5c76ad6cdb60129cf1fdd2aa8fae1cadc23e1b1f",
+      "version": "1.108.317",
+      "license": "jCodeMunch Dual-Use 1.1",
+      "runtime": "Python",
+      "semantic_mode": "disabled; structural retrieval only",
+      "audit_status": "conditionally_allowed_noncommercial_evaluation_only"
+    }
+  ]
+}

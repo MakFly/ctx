@@ -243,6 +243,11 @@ See [benchmarks/README.md](benchmarks/README.md) for the methodology. The
 command writes the complete environment and percentiles to the requested JSON
 path. Results are synthetic measurements, not guarantees for every repository.
 
+A separate [real-repository competitive benchmark](benchmarks/competitive/README.md)
+pins ten public repositories and four competing MCP tools. Its corpus and
+forty source facts are verified; cross-tool results will only be published once
+the isolated competitor runs are complete.
+
 Latest measured release run (2026-09-04, Ryzen 7 3700X, Linux x86_64,
 1,002 indexed files):
 

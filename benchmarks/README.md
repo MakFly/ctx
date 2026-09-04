@@ -1,5 +1,11 @@
 # ctx benchmarks
 
+For the pinned ten-repository comparison against codebase-memory-mcp,
+codesearch, Serena, and jCodeMunch, see the
+[`competitive/` benchmark](competitive/README.md). Its corpus, security review,
+ground truth, runner, and intermediate raw results are kept separate from the
+synthetic microbenchmark below.
+
 The benchmark is implemented in Rust and calls the same library used by the
 `ctx` CLI and persistent MCP server. It creates a temporary mixed-language
 repository, then records:

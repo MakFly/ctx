@@ -1,0 +1,136 @@
+{
+  "schema": 1,
+  "generated_at": "2026-09-04",
+  "repositories": [
+    {
+      "id": "requests",
+      "language": "python",
+      "url": "https://github.com/psf/requests.git",
+      "commit": "dae7ef63b4df6eded86637f251fc4e3a06c3b479",
+      "question": "Trace a top-level requests.get call through request, Session.request, and HTTPAdapter.send. Cite the definition of each symbol with exact path:line evidence.",
+      "checks": [
+        {"symbol": "get", "path": "src/requests/api.py", "line": 74},
+        {"symbol": "request", "path": "src/requests/api.py", "line": 24},
+        {"symbol": "Session.request", "path": "src/requests/sessions.py", "line": 557},
+        {"symbol": "HTTPAdapter.send", "path": "src/requests/adapters.py", "line": 634}
+      ]
+    },
+    {
+      "id": "fastapi",
+      "language": "python",
+      "url": "https://github.com/fastapi/fastapi.git",
+      "commit": "50113da16fec53b66b80d75e80a89296de4fa5a5",
+      "question": "Locate the core FastAPI dependency-injection path: Depends, get_dependant, and solve_dependencies, plus the get_openapi entry point. Cite every definition with exact path:line evidence.",
+      "checks": [
+        {"symbol": "Depends", "path": "fastapi/params.py", "line": 746},
+        {"symbol": "get_dependant", "path": "fastapi/dependencies/utils.py", "line": 271},
+        {"symbol": "solve_dependencies", "path": "fastapi/dependencies/utils.py", "line": 586},
+        {"symbol": "get_openapi", "path": "fastapi/openapi/utils.py", "line": 585}
+      ]
+    },
+    {
+      "id": "express",
+      "language": "javascript",
+      "url": "https://github.com/expressjs/express.git",
+      "commit": "023767fe9872e029271df1418f73401bff20ff40",
+      "question": "Locate Express's app.use and app.route registration functions and the res.send and res.json response functions. Cite every definition with exact path:line evidence.",
+      "checks": [
+        {"symbol": "app.use", "path": "lib/application.js", "line": 190},
+        {"symbol": "app.route", "path": "lib/application.js", "line": 256},
+        {"symbol": "res.send", "path": "lib/response.js", "line": 126},
+        {"symbol": "res.json", "path": "lib/response.js", "line": 234}
+      ]
+    },
+    {
+      "id": "vue",
+      "language": "typescript",
+      "url": "https://github.com/vuejs/core.git",
+      "commit": "d105e19e914bca6e1140bfec074e055ed0679e21",
+      "question": "Locate Vue's reactivity track and trigger functions, ComputedRefImpl, and the keyed virtual-DOM patch implementation. Cite every definition with exact path:line evidence.",
+      "checks": [
+        {"symbol": "track", "path": "packages/reactivity/src/dep.ts", "line": 262},
+        {"symbol": "trigger", "path": "packages/reactivity/src/dep.ts", "line": 294},
+        {"symbol": "ComputedRefImpl", "path": "packages/reactivity/src/computed.ts", "line": 47},
+        {"symbol": "patchKeyedChildren", "path": "packages/runtime-core/src/renderer.ts", "line": 1804}
+      ]
+    },
+    {
+      "id": "gin",
+      "language": "go",
+      "url": "https://github.com/gin-gonic/gin.git",
+      "commit": "dcaa4296d111981ffb31ac3eba90bb63e1eb5ab9",
+      "question": "Locate Gin's Engine.addRoute, radix-node addRoute and getValue methods, and Context.Next. Cite every definition with exact path:line evidence.",
+      "checks": [
+        {"symbol": "Engine.addRoute", "path": "gin.go", "line": 364},
+        {"symbol": "node.addRoute", "path": "tree.go", "line": 135},
+        {"symbol": "node.getValue", "path": "tree.go", "line": 418},
+        {"symbol": "Context.Next", "path": "context.go", "line": 198}
+      ]
+    },
+    {
+      "id": "chi",
+      "language": "go",
+      "url": "https://github.com/go-chi/chi.git",
+      "commit": "ae6be7469132cf471ca099d8c7bda4010c4ff7b2",
+      "question": "Locate Chi's Mux.ServeHTTP and routeHTTP request path plus the radix-node InsertRoute and findRoute methods. Cite every definition with exact path:line evidence.",
+      "checks": [
+        {"symbol": "Mux.ServeHTTP", "path": "mux.go", "line": 63},
+        {"symbol": "Mux.routeHTTP", "path": "mux.go", "line": 455},
+        {"symbol": "node.InsertRoute", "path": "tree.go", "line": 148},
+        {"symbol": "node.findRoute", "path": "tree.go", "line": 410}
+      ]
+    },
+    {
+      "id": "axum",
+      "language": "rust",
+      "url": "https://github.com/tokio-rs/axum.git",
+      "commit": "130b421f2695a003dcf55a18d68f112f2b442b20",
+      "question": "Locate Axum's Router.route and Router.with_state methods, the State extractor, and middleware from_fn. Cite every definition with exact path:line evidence.",
+      "checks": [
+        {"symbol": "Router.route", "path": "axum/src/routing/mod.rs", "line": 192},
+        {"symbol": "Router.with_state", "path": "axum/src/routing/mod.rs", "line": 444},
+        {"symbol": "State", "path": "axum/src/extract/state.rs", "line": 301},
+        {"symbol": "from_fn", "path": "axum/src/middleware/from_fn.rs", "line": 114}
+      ]
+    },
+    {
+      "id": "ripgrep",
+      "language": "rust",
+      "url": "https://github.com/BurntSushi/ripgrep.git",
+      "commit": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "question": "Trace ripgrep's main search path by locating run, search, SearchWorker.search, and SearchWorker.search_path. Cite every definition with exact path:line evidence.",
+      "checks": [
+        {"symbol": "run", "path": "crates/core/main.rs", "line": 78},
+        {"symbol": "search", "path": "crates/core/main.rs", "line": 113},
+        {"symbol": "SearchWorker.search", "path": "crates/core/search.rs", "line": 245},
+        {"symbol": "SearchWorker.search_path", "path": "crates/core/search.rs", "line": 342}
+      ]
+    },
+    {
+      "id": "slim",
+      "language": "php",
+      "url": "https://github.com/slimphp/Slim.git",
+      "commit": "3675bf6baac66b07032575b7bef4200b60b7974b",
+      "question": "Trace Slim's request execution by locating App.run, App.handle, MiddlewareDispatcher.handle, and RouteRunner.handle. Cite every definition with exact path:line evidence.",
+      "checks": [
+        {"symbol": "App.run", "path": "Slim/App.php", "line": 186},
+        {"symbol": "App.handle", "path": "Slim/App.php", "line": 207},
+        {"symbol": "MiddlewareDispatcher.handle", "path": "Slim/MiddlewareDispatcher.php", "line": 71},
+        {"symbol": "RouteRunner.handle", "path": "Slim/Routing/RouteRunner.php", "line": 57}
+      ]
+    },
+    {
+      "id": "symfony-http-kernel",
+      "language": "php",
+      "url": "https://github.com/symfony/http-kernel.git",
+      "commit": "78ea1190917207d72a2b248401e35f904e9f545f",
+      "question": "Trace Symfony HttpKernel request handling by locating HttpKernel.handle, handleRaw, ControllerResolver.getController, and filterResponse. Cite every definition with exact path:line evidence.",
+      "checks": [
+        {"symbol": "HttpKernel.handle", "path": "HttpKernel.php", "line": 72},
+        {"symbol": "HttpKernel.handleRaw", "path": "HttpKernel.php", "line": 158},
+        {"symbol": "ControllerResolver.getController", "path": "Controller/ControllerResolver.php", "line": 54},
+        {"symbol": "HttpKernel.filterResponse", "path": "HttpKernel.php", "line": 217}
+      ]
+    }
+  ]
+}
