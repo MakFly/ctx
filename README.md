@@ -248,13 +248,13 @@ Latest measured release run (2026-09-04, Ryzen 7 3700X, Linux x86_64,
 
 | Operation | Result |
 |---|---:|
-| Cold index | 197.07 ms / 5,085 files/s |
-| Unchanged reindex | 38.42 ms |
-| Symbol search p50 / p95 | 1.68 / 1.97 ms |
-| Text search p50 / p95 | 1.21 / 1.34 ms |
-| Definition graph p50 / p95 | 0.55 / 0.77 ms |
-| Callers graph p50 / p95 | 0.60 / 0.63 ms |
-| Context pack p50 / p95 | 4.72 / 5.16 ms |
+| Cold index | 190.28 ms / 5,266 files/s |
+| Unchanged reindex | 36.25 ms |
+| Symbol search p50 / p95 | 1.64 / 1.72 ms |
+| Text search p50 / p95 | 1.19 / 1.25 ms |
+| Definition graph p50 / p95 | 0.53 / 0.56 ms |
+| Callers graph p50 / p95 | 0.60 / 0.71 ms |
+| Context pack p50 / p95 | 6.38 / 6.61 ms |
 
 Raw measurements and the full percentile table are available in
 [`benchmarks/results/latest.json`](benchmarks/results/latest.json).
@@ -264,12 +264,22 @@ Agent-level A/B on the ten-file fixture, using Codex CLI 0.153.1 with
 
 | Variant | Wall time | Input tokens | Output tokens | Tool calls | Accuracy |
 |---|---:|---:|---:|---:|---:|
-| Compact `ctx_pack` MCP | 16.63 s | 43,999 | 411 | 1 | 4/4 |
-| Shell search baseline | 20.10 s | 44,080 | 546 | 2 | 4/4 |
+| Shell search baseline | 22.91 s | 61,192 | 568 | 3 | 4/4 |
+| Compact `ctx_pack` MCP | 17.90 s | 45,715 | 466 | 1 | 4/4 |
+| `ctx run`, clean cache miss | 15.58 s | 46,551 | 506 | 1 | 4/4 |
+| `ctx run`, exact cache hit | 0.01 s | 0 | 0 | 0 | 4/4 |
 
-The MCP path was 17.3% faster here while using 0.2% fewer total input tokens
-and 41.8% fewer uncached input tokens. See [the full A/B methodology and pre-optimization
-result](benchmarks/README.md#codex-exec-ctx-mcp-versus-shell-baseline).
+On this controlled fixture, compact MCP was 21.9% faster than shell search and
+used 25.3% fewer total input tokens. Against the original pre-optimization MCP
+snapshot, it was 43.6% faster and used 61.7% fewer input tokens. An exact clean
+cache hit avoided the harness entirely and returned in 15 ms internally. The
+uncached-input difference between fresh MCP and shell runs was only 0.4%, so
+provider prompt caching explains part of the total-token gap.
+
+Native retrieval improved for indexing and most queries versus the prior
+same-host snapshot, but context-pack p50 regressed from 4.724 ms to 6.380 ms
+(+1.656 ms). See [the complete methodology, percentiles, raw runs, and honest
+before/after notes](benchmarks/README.md#codex-exec-ctx-mcp-versus-shell-baseline).
 
 ## Project status
 

@@ -31,9 +31,11 @@ with identical arguments.
 
 ## Latest measured result
 
-Measured on 2026-09-04 by running the command above. Compilation time is not
-included. The generated corpus contained 1,000 code files split evenly across
-the five languages, plus a README and a call site.
+Measured on 2026-09-04 after rebuilding `ctx` 0.3.0. Compilation time is not
+included. The benchmark was executed three times; the committed snapshot is
+the middle cold-index run. Each retrieval row contains 10 warmups and 100
+measured iterations. The generated corpus contained 1,000 code files split
+evenly across the five languages, plus a README and a call site.
 
 | Environment | Value |
 |---|---|
@@ -50,19 +52,25 @@ Indexing measurements are end-to-end wall-clock durations:
 
 | Operation | Duration | Throughput / changes |
 |---|---:|---:|
-| Cold index | 197.069 ms | 5,084.511 files/s |
-| Unchanged reindex | 38.421 ms | 0 changed files |
+| Cold index | 190.275 ms | 5,266.062 files/s |
+| Unchanged reindex | 36.254 ms | 0 changed files |
 
 Retrieval results use 10 warmups followed by 100 measured iterations in the
 same process:
 
 | Operation | Min | p50 | p95 | p99 | Max | Mean |
 |---|---:|---:|---:|---:|---:|---:|
-| Symbol search | 1.536 ms | 1.683 ms | 1.970 ms | 2.258 ms | 2.381 ms | 1.708 ms |
-| Text search | 1.171 ms | 1.206 ms | 1.339 ms | 1.360 ms | 1.398 ms | 1.224 ms |
-| Definition graph | 0.530 ms | 0.550 ms | 0.772 ms | 0.817 ms | 0.832 ms | 0.592 ms |
-| Callers graph | 0.577 ms | 0.596 ms | 0.633 ms | 0.668 ms | 0.701 ms | 0.602 ms |
-| Context pack | 4.589 ms | 4.724 ms | 5.158 ms | 5.260 ms | 5.481 ms | 4.778 ms |
+| Symbol search | 1.509 ms | 1.638 ms | 1.722 ms | 1.764 ms | 1.828 ms | 1.627 ms |
+| Text search | 1.163 ms | 1.188 ms | 1.249 ms | 1.293 ms | 1.390 ms | 1.195 ms |
+| Definition graph | 0.525 ms | 0.533 ms | 0.559 ms | 0.589 ms | 0.653 ms | 0.537 ms |
+| Callers graph | 0.573 ms | 0.599 ms | 0.711 ms | 0.744 ms | 0.744 ms | 0.615 ms |
+| Context pack | 6.256 ms | 6.380 ms | 6.609 ms | 6.656 ms | 6.751 ms | 6.407 ms |
+
+Against the previous same-host snapshot, cold indexing improved 3.4%, unchanged
+reindexing improved 5.6%, symbol/text/definition p50 improved 1.5-3.1%, and
+callers p50 was effectively flat (+0.5%). Context-pack p50 regressed from
+4.724 ms to 6.380 ms (+35.1%, or +1.656 ms). That regression is retained here
+rather than hidden; end-to-end agent latency is still dominated by the harness.
 
 The machine-readable source for these tables is
 [`results/latest.json`](results/latest.json). This is a real execution against
@@ -71,23 +79,30 @@ production repository.
 
 ## Codex exec: ctx MCP versus shell baseline
 
-Three runs per variant used Codex CLI 0.153.1 with `gpt-5.6-luna`, reasoning
-effort `high`, an ephemeral read-only session, the same four code-navigation
-questions, and the ten-file `mini_repo` fixture. The optimized MCP variant
-exposed only `ctx_pack`; the baseline could use normal shell search and
-targeted reads but no MCP. Every run answered all four checked facts correctly.
+Three fresh runs per variant used Codex CLI 0.153.1 with `gpt-5.6-luna`,
+reasoning effort `high`, an ephemeral read-only session, the same four
+code-navigation questions, and the same clean ten-file `mini_repo` fixture.
+User configuration and rules were disabled. The MCP variant could call only
+`ctx_pack`; the baseline could use shell search and targeted reads but no MCP.
+Every run answered all four checked facts correctly.
 
-| Median of 3 runs | MCP before | One-shot structured | Compact MCP | Shell baseline | Compact vs shell |
-|---|---:|---:|---:|---:|---:|
-| Wall time | 31.72 s | 17.26 s | 16.63 s | 20.10 s | -17.3% |
-| Input tokens, including cached | 119,470 | 54,844 | 43,999 | 44,080 | -0.2% |
-| Cached input tokens | 97,024 | 42,240 | 37,120 | 32,000 | +16.0% |
-| Uncached input tokens | 22,446 | 12,604 | 6,879 | 11,817 | -41.8% |
-| Output tokens | 968 | 438 | 411 | 546 | -24.7% |
-| Reasoning output tokens | 522 | 163 | 147 | 207 | -29.0% |
-| Tool calls | 5 | 1 | 1 | 2 | -50.0% |
-| Tool payload tokens | 1,733 | 459 | 459 | n/a | n/a |
-| Accuracy | 4/4 | 4/4 | 4/4 | 4/4 | equal |
+| Median of 3 fresh runs | Shell baseline | Compact MCP | MCP vs shell |
+|---|---:|---:|---:|
+| Wall time | 22.91 s | 17.90 s | -21.9% |
+| Input tokens, including cached | 61,192 | 45,715 | -25.3% |
+| Cached input tokens | 46,080 | 37,120 | -19.4% |
+| Uncached input tokens | 8,628 | 8,595 | -0.4% |
+| Output tokens | 568 | 466 | -18.0% |
+| Reasoning output tokens | 167 | 160 | -4.2% |
+| Tool calls | 3 | 1 | -66.7% |
+| MCP tool payload tokens | n/a | 459 | n/a |
+| Accuracy | 4/4 | 4/4 | equal |
+
+Compared with the original pre-optimization MCP snapshot, the current compact
+MCP median is 43.6% faster (31.72 s -> 17.90 s), uses 61.7% fewer input tokens
+(119,470 -> 45,715), 51.9% fewer output tokens, and one tool call instead of
+five. The paired fresh shell comparison above is the fairer measure of present
+behavior; the historical row shows the gain from the implementation work.
 
 The improvement comes from making the pack answer-ready: one request returns
 exact symbol definitions, callers, callees, and explicit citation spans. The
@@ -95,8 +110,9 @@ Codex installer runs `ctx mcp --compact`, which physically exposes only a
 query-only `ctx_pack` tool and avoids returning the same envelope in both text
 and `structuredContent`. This removes repeated model/tool round trips and
 reduces MCP schema/result overhead. On this small fixture the compact path is
-faster and uses fewer tokens than shell search. The `ctx` engine itself reports
-7-16 ms per compact pack in these runs. Larger repository evaluation is still
+faster and uses fewer total tokens than shell search. Uncached input was nearly
+equal in this particular run, so the total-input gain partly reflects
+provider-side prompt caching. Larger and real-repository evaluation is still
 required before generalizing the result.
 
 Raw per-run measurements and the exact methodology are in
@@ -104,15 +120,16 @@ Raw per-run measurements and the exact methodology are in
 
 ## Exact non-interactive response cache
 
-A real `ctx run` integration check used the same Luna/high setup on the clean
-fixture. The first request launched Codex; the second identical request was
-validated and returned from `.ctx/cache.sqlite` without starting a harness.
+A real `ctx run` benchmark used the same question, model, effort, and clean
+fixture. Three forced refreshes launched Codex; three following exact requests
+were validated and returned from `.ctx/cache.sqlite` without starting a
+harness.
 
-| Run | Wall time | Input tokens | Output tokens | Result |
-|---|---:|---:|---:|---:|
-| Clean cache miss | 14.50 s | 46,017 | 381 | 2/2 |
-| Exact cache hit | 0.02 s | 0 | 0 | 2/2 |
+| Median of 3 runs | Wall time | ctx duration | Input tokens | Output tokens | Accuracy |
+|---|---:|---:|---:|---:|---:|
+| Clean cache miss | 15.58 s | 15,574 ms | 46,551 | 506 | 4/4 |
+| Exact cache hit | 0.01 s | 15 ms | 0 | 0 | 4/4 |
 
-This is a single end-to-end integration check, not a percentile claim. The
-machine-readable record is
+The exact hit reduced observed wall time by more than 99.9% and started no
+harness process. The machine-readable per-run record is
 [`results/codex-run-cache.json`](results/codex-run-cache.json).

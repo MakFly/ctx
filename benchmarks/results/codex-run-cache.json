@@ -1,32 +1,94 @@
 {
-  "schema": 1,
-  "generated_at": "2026-09-04T17:27:23Z",
+  "schema": 2,
+  "generated_at": "2026-09-04T17:43:00Z",
   "runner": {
-    "name": "codex exec",
-    "version": "0.153.1",
+    "name": "ctx run -> codex exec",
+    "codex_version": "0.153.1",
+    "ctx_version": "0.3.0",
     "model": "gpt-5.6-luna",
     "model_reasoning_effort": "high"
   },
-  "fixture": "tests/fixtures/mini_repo",
-  "question": "Where is login defined and what database function does it call?",
-  "runs": {
-    "clean_miss": {
-      "wall_seconds": 14.50,
-      "ctx_duration_ms": 14491,
-      "input_tokens": 46017,
-      "output_tokens": 381,
-      "reasoning_tokens": 171,
-      "accuracy": "2/2"
+  "fixture": {
+    "path": "tests/fixtures/mini_repo",
+    "files": 10,
+    "symbols": 18,
+    "edges": 26,
+    "git_clean": true
+  },
+  "question": "Where is login defined? Which function calls login? Which database function does login call? Where is retry_payment defined? Answer concisely with exact path:line citations.",
+  "methodology": {
+    "refresh_runs": 3,
+    "exact_hit_runs": 3,
+    "refresh_flag": "--cache refresh",
+    "hit_flag": "--cache auto",
+    "same_question_model_effort_sha": true,
+    "accuracy_checks_per_run": 4,
+    "wall_time_source": "/usr/bin/time",
+    "duration_source": "ctx JSON response"
+  },
+  "variants": {
+    "clean_cache_miss": {
+      "runs": [
+        {
+          "wall_seconds": 15.21,
+          "ctx_duration_ms": 15208,
+          "harness_ms": 15189,
+          "input_tokens": 46488,
+          "output_tokens": 467,
+          "reasoning_tokens": 200,
+          "accuracy": "4/4"
+        },
+        {
+          "wall_seconds": 16.25,
+          "ctx_duration_ms": 16254,
+          "harness_ms": 16238,
+          "input_tokens": 46551,
+          "output_tokens": 542,
+          "reasoning_tokens": 157,
+          "accuracy": "4/4"
+        },
+        {
+          "wall_seconds": 15.58,
+          "ctx_duration_ms": 15574,
+          "harness_ms": 15559,
+          "input_tokens": 46551,
+          "output_tokens": 506,
+          "reasoning_tokens": 211,
+          "accuracy": "4/4"
+        }
+      ],
+      "median": {
+        "wall_seconds": 15.58,
+        "ctx_duration_ms": 15574,
+        "harness_ms": 15559,
+        "input_tokens": 46551,
+        "output_tokens": 506,
+        "reasoning_tokens": 200,
+        "accuracy": "4/4"
+      }
     },
-    "exact_hit": {
-      "wall_seconds": 0.02,
-      "ctx_duration_ms": 18,
-      "input_tokens": 0,
-      "output_tokens": 0,
-      "reasoning_tokens": 0,
-      "harness_process_started": false,
-      "accuracy": "2/2"
+    "exact_cache_hit": {
+      "runs": [
+        {"wall_seconds": 0.01, "ctx_duration_ms": 14, "harness_process_started": false, "accuracy": "4/4"},
+        {"wall_seconds": 0.01, "ctx_duration_ms": 15, "harness_process_started": false, "accuracy": "4/4"},
+        {"wall_seconds": 0.01, "ctx_duration_ms": 15, "harness_process_started": false, "accuracy": "4/4"}
+      ],
+      "median": {
+        "wall_seconds": 0.01,
+        "ctx_duration_ms": 15,
+        "harness_process_started": false,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "reasoning_tokens": 0,
+        "accuracy": "4/4"
+      }
     }
   },
-  "note": "One real miss followed by one exact clean-tree cache hit. This integration check is not a percentile benchmark."
+  "median_delta_exact_hit_vs_miss_percent": {
+    "wall_seconds": -99.9,
+    "input_tokens": -100.0,
+    "output_tokens": -100.0,
+    "reasoning_tokens": -100.0
+  },
+  "note": "An exact hit validates the clean-tree cache entry and returns it without launching Codex."
 }

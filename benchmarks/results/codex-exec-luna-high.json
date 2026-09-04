@@ -1,6 +1,6 @@
 {
-  "schema": 1,
-  "generated_at": "2026-09-04T16:45:21Z",
+  "schema": 2,
+  "generated_at": "2026-09-04T17:42:00Z",
   "runner": {
     "name": "codex exec",
     "version": "0.153.1",
@@ -14,221 +14,150 @@
     "files": 10,
     "symbols": 18,
     "edges": 26,
-    "index_elapsed_seconds": 0.01
+    "git_clean": true
   },
-  "question": "Where is login defined? Which function calls login? Which database function does login call? Where is retry_payment defined? Answer with exact path:line citations.",
+  "question": "Where is login defined? Which function calls login? Which database function does login call? Where is retry_payment defined? Answer concisely with exact path:line citations.",
   "methodology": {
     "paired_runs": 3,
-    "same_source_tree": true,
+    "same_clean_source_tree": true,
     "same_question": true,
-    "mcp_constraint": "ctx_pack only; no shell or direct file reads",
-    "baseline_constraint": "no MCP or ctx; normal shell search and targeted reads",
-    "user_config_ignored": true,
+    "user_config_and_rules_ignored": true,
+    "mcp_constraint": "ctx_pack only; no shell commands or direct file reads",
+    "baseline_constraint": "no ctx or MCP; normal shell search and targeted reads only",
     "accuracy_checks_per_run": 4,
-    "optimized_configuration": "ctx mcp --compact physically exposes one query-only ctx_pack tool, returns one text envelope without duplicate structuredContent, caps the pack at 800 tokens, and includes exact definitions/callers/callees"
+    "token_source": "Codex turn.completed usage",
+    "wall_time_source": "/usr/bin/time",
+    "mcp_configuration": "ctx mcp --compact; one ctx_pack call; output token limit 1200"
   },
   "variants": {
-    "ctx_mcp_before": {
-      "runs": [
-        {
-          "elapsed_seconds": 29.45,
-          "input_tokens": 93795,
-          "cached_input_tokens": 71680,
-          "uncached_input_tokens": 22115,
-          "output_tokens": 950,
-          "reasoning_output_tokens": 561,
-          "tool_calls": 4,
-          "tool_payload_tokens": 1733,
-          "accuracy": "4/4"
-        },
-        {
-          "elapsed_seconds": 31.72,
-          "input_tokens": 122518,
-          "cached_input_tokens": 99072,
-          "uncached_input_tokens": 23446,
-          "output_tokens": 968,
-          "reasoning_output_tokens": 522,
-          "tool_calls": 5,
-          "tool_payload_tokens": 1944,
-          "accuracy": "4/4"
-        },
-        {
-          "elapsed_seconds": 32.26,
-          "input_tokens": 119470,
-          "cached_input_tokens": 97024,
-          "uncached_input_tokens": 22446,
-          "output_tokens": 990,
-          "reasoning_output_tokens": 481,
-          "tool_calls": 5,
-          "tool_payload_tokens": 1312,
-          "accuracy": "4/4"
-        }
-      ],
-      "median": {
-        "elapsed_seconds": 31.72,
-        "input_tokens": 119470,
-        "cached_input_tokens": 97024,
-        "uncached_input_tokens": 22446,
-        "output_tokens": 968,
-        "reasoning_output_tokens": 522,
-        "tool_calls": 5,
-        "tool_payload_tokens": 1733
-      }
-    },
-    "ctx_mcp_one_shot_structured": {
-      "runs": [
-        {
-          "elapsed_seconds": 18.40,
-          "input_tokens": 54844,
-          "cached_input_tokens": 42240,
-          "uncached_input_tokens": 12604,
-          "output_tokens": 448,
-          "reasoning_output_tokens": 171,
-          "tool_calls": 1,
-          "tool_payload_tokens": 459,
-          "accuracy": "4/4"
-        },
-        {
-          "elapsed_seconds": 17.26,
-          "input_tokens": 44158,
-          "cached_input_tokens": 32000,
-          "uncached_input_tokens": 12158,
-          "output_tokens": 438,
-          "reasoning_output_tokens": 163,
-          "tool_calls": 1,
-          "tool_payload_tokens": 459,
-          "accuracy": "4/4"
-        },
-        {
-          "elapsed_seconds": 16.58,
-          "input_tokens": 54864,
-          "cached_input_tokens": 42240,
-          "uncached_input_tokens": 12624,
-          "output_tokens": 416,
-          "reasoning_output_tokens": 141,
-          "tool_calls": 1,
-          "tool_payload_tokens": 459,
-          "accuracy": "4/4"
-        }
-      ],
-      "median": {
-        "elapsed_seconds": 17.26,
-        "input_tokens": 54844,
-        "cached_input_tokens": 42240,
-        "uncached_input_tokens": 12604,
-        "output_tokens": 438,
-        "reasoning_output_tokens": 163,
-        "tool_calls": 1,
-        "tool_payload_tokens": 459
-      }
-    },
-    "ctx_mcp_optimized_compact": {
-      "runs": [
-        {
-          "elapsed_seconds": 15.89,
-          "input_tokens": 43952,
-          "cached_input_tokens": 42240,
-          "uncached_input_tokens": 1712,
-          "output_tokens": 395,
-          "reasoning_output_tokens": 128,
-          "tool_calls": 1,
-          "tool_payload_tokens": 459,
-          "accuracy": "4/4"
-        },
-        {
-          "elapsed_seconds": 21.36,
-          "input_tokens": 44033,
-          "cached_input_tokens": 37120,
-          "uncached_input_tokens": 6913,
-          "output_tokens": 500,
-          "reasoning_output_tokens": 221,
-          "tool_calls": 1,
-          "tool_payload_tokens": 459,
-          "accuracy": "4/4"
-        },
-        {
-          "elapsed_seconds": 16.63,
-          "input_tokens": 43999,
-          "cached_input_tokens": 37120,
-          "uncached_input_tokens": 6879,
-          "output_tokens": 411,
-          "reasoning_output_tokens": 147,
-          "tool_calls": 1,
-          "tool_payload_tokens": 459,
-          "accuracy": "4/4"
-        }
-      ],
-      "median": {
-        "elapsed_seconds": 16.63,
-        "input_tokens": 43999,
-        "cached_input_tokens": 37120,
-        "uncached_input_tokens": 6879,
-        "output_tokens": 411,
-        "reasoning_output_tokens": 147,
-        "tool_calls": 1,
-        "tool_payload_tokens": 459
-      }
-    },
     "shell_baseline": {
       "runs": [
         {
-          "elapsed_seconds": 17.56,
-          "input_tokens": 44080,
-          "cached_input_tokens": 34048,
-          "uncached_input_tokens": 10032,
-          "output_tokens": 465,
-          "reasoning_output_tokens": 168,
-          "tool_calls": 2,
+          "elapsed_seconds": 23.62,
+          "input_tokens": 61224,
+          "cached_input_tokens": 54272,
+          "uncached_input_tokens": 6952,
+          "output_tokens": 636,
+          "reasoning_output_tokens": 155,
+          "tool_calls": 3,
           "accuracy": "4/4"
         },
         {
-          "elapsed_seconds": 20.10,
-          "input_tokens": 43817,
-          "cached_input_tokens": 32000,
-          "uncached_input_tokens": 11817,
-          "output_tokens": 546,
-          "reasoning_output_tokens": 207,
-          "tool_calls": 2,
+          "elapsed_seconds": 22.91,
+          "input_tokens": 61192,
+          "cached_input_tokens": 46080,
+          "uncached_input_tokens": 15112,
+          "output_tokens": 568,
+          "reasoning_output_tokens": 167,
+          "tool_calls": 3,
           "accuracy": "4/4"
         },
         {
-          "elapsed_seconds": 22.18,
-          "input_tokens": 44213,
-          "cached_input_tokens": 32000,
-          "uncached_input_tokens": 12213,
-          "output_tokens": 689,
-          "reasoning_output_tokens": 368,
-          "tool_calls": 2,
+          "elapsed_seconds": 19.68,
+          "input_tokens": 45748,
+          "cached_input_tokens": 37120,
+          "uncached_input_tokens": 8628,
+          "output_tokens": 474,
+          "reasoning_output_tokens": 178,
+          "tool_calls": 3,
           "accuracy": "4/4"
         }
       ],
       "median": {
-        "elapsed_seconds": 20.10,
-        "input_tokens": 44080,
-        "cached_input_tokens": 32000,
-        "uncached_input_tokens": 11817,
-        "output_tokens": 546,
-        "reasoning_output_tokens": 207,
-        "tool_calls": 2
+        "elapsed_seconds": 22.91,
+        "input_tokens": 61192,
+        "cached_input_tokens": 46080,
+        "uncached_input_tokens": 8628,
+        "output_tokens": 568,
+        "reasoning_output_tokens": 167,
+        "tool_calls": 3,
+        "accuracy": "4/4"
+      }
+    },
+    "ctx_mcp_compact": {
+      "runs": [
+        {
+          "elapsed_seconds": 17.64,
+          "input_tokens": 45715,
+          "cached_input_tokens": 37120,
+          "uncached_input_tokens": 8595,
+          "output_tokens": 427,
+          "reasoning_output_tokens": 138,
+          "tool_calls": 1,
+          "tool_payload_tokens": 459,
+          "accuracy": "4/4"
+        },
+        {
+          "elapsed_seconds": 17.90,
+          "input_tokens": 45701,
+          "cached_input_tokens": 39168,
+          "uncached_input_tokens": 6533,
+          "output_tokens": 466,
+          "reasoning_output_tokens": 160,
+          "tool_calls": 1,
+          "tool_payload_tokens": 459,
+          "accuracy": "4/4"
+        },
+        {
+          "elapsed_seconds": 19.20,
+          "input_tokens": 45726,
+          "cached_input_tokens": 37120,
+          "uncached_input_tokens": 8606,
+          "output_tokens": 549,
+          "reasoning_output_tokens": 242,
+          "tool_calls": 1,
+          "tool_payload_tokens": 459,
+          "accuracy": "4/4"
+        }
+      ],
+      "median": {
+        "elapsed_seconds": 17.90,
+        "input_tokens": 45715,
+        "cached_input_tokens": 37120,
+        "uncached_input_tokens": 8595,
+        "output_tokens": 466,
+        "reasoning_output_tokens": 160,
+        "tool_calls": 1,
+        "tool_payload_tokens": 459,
+        "accuracy": "4/4"
       }
     }
   },
-  "median_delta_optimized_ctx_vs_baseline_percent": {
-    "elapsed_seconds": -17.3,
-    "input_tokens": -0.2,
-    "uncached_input_tokens": -41.8,
-    "output_tokens": -24.7,
-    "reasoning_output_tokens": -29.0,
-    "tool_calls": -50.0
+  "median_delta_ctx_mcp_vs_shell_percent": {
+    "elapsed_seconds": -21.9,
+    "input_tokens": -25.3,
+    "cached_input_tokens": -19.4,
+    "uncached_input_tokens": -0.4,
+    "output_tokens": -18.0,
+    "reasoning_output_tokens": -4.2,
+    "tool_calls": -66.7
   },
-  "median_delta_optimized_vs_previous_ctx_percent": {
-    "elapsed_seconds": -47.6,
-    "input_tokens": -63.2,
-    "uncached_input_tokens": -69.4,
-    "output_tokens": -57.5,
-    "reasoning_output_tokens": -71.8,
-    "tool_calls": -80.0,
-    "tool_payload_tokens": -73.5
+  "historical_before_optimization": {
+    "generated_at": "2026-09-04T16:45:21Z",
+    "median": {
+      "elapsed_seconds": 31.72,
+      "input_tokens": 119470,
+      "cached_input_tokens": 97024,
+      "uncached_input_tokens": 22446,
+      "output_tokens": 968,
+      "reasoning_output_tokens": 522,
+      "tool_calls": 5,
+      "tool_payload_tokens": 1733,
+      "accuracy": "4/4"
+    },
+    "current_compact_delta_percent": {
+      "elapsed_seconds": -43.6,
+      "input_tokens": -61.7,
+      "uncached_input_tokens": -61.7,
+      "output_tokens": -51.9,
+      "reasoning_output_tokens": -69.3,
+      "tool_calls": -80.0,
+      "tool_payload_tokens": -73.5
+    }
   },
-  "conclusion": "On this ten-file fixture, the compact one-shot ctx MCP path is 17.3% faster than the shell median and preserves 4/4 accuracy. It uses 0.2% fewer total input tokens, 41.8% fewer uncached input tokens, 24.7% fewer output tokens, and 29.0% fewer reasoning tokens. This result should not be extrapolated to large repositories."
+  "notes": [
+    "All six fresh runs answered the four checked facts correctly with valid fixture citations.",
+    "Provider-side prompt caching varies between runs; both total and uncached input are reported.",
+    "This small controlled fixture measures agent navigation overhead, not arbitrary production repository performance."
+  ]
 }
