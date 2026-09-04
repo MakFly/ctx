@@ -68,3 +68,31 @@ The machine-readable source for these tables is
 [`results/latest.json`](results/latest.json). This is a real execution against
 a reproducible synthetic corpus; it is not a measurement of an arbitrary
 production repository.
+
+## Codex exec: ctx MCP versus shell baseline
+
+Three paired runs used Codex CLI 0.153.1 with `gpt-5.6-luna`, reasoning effort
+`high`, an ephemeral read-only session, the same four code-navigation
+questions, and the ten-file `mini_repo` fixture. The MCP variant could use only
+`ctx`; the baseline could use normal shell search and targeted reads but no
+MCP. Both variants answered all 12 checked facts correctly.
+
+| Median of 3 runs | ctx MCP | Shell baseline | ctx impact |
+|---|---:|---:|---:|
+| Wall time | 31.72 s | 20.10 s | +57.8% |
+| Input tokens, including cached | 119,470 | 44,080 | +171.0% |
+| Cached input tokens | 97,024 | 32,000 | +203.2% |
+| Uncached input tokens | 22,446 | 11,817 | +90.0% |
+| Output tokens | 968 | 546 | +77.3% |
+| Reasoning output tokens | 522 | 207 | +152.2% |
+| Tool calls | 5 | 2 | +150.0% |
+| Accuracy | 4/4 | 4/4 | equal |
+
+This small-repository result is unfavorable to MCP: two targeted `rg`/read
+commands can inspect the whole fixture, while the agent chose four or five MCP
+round trips. The `ctx` engine itself was not the bottleneck: indexing took
+0.01 s and individual retrieval envelopes reported 0-7 ms freshness. Larger
+repository evaluation is required before claiming a token or latency win.
+
+Raw per-run measurements and the exact methodology are in
+[`results/codex-exec-luna-high.json`](results/codex-exec-luna-high.json).

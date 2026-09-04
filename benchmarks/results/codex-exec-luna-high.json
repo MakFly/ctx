@@ -1,0 +1,129 @@
+{
+  "schema": 1,
+  "generated_at": "2026-09-04T16:15:25Z",
+  "runner": {
+    "name": "codex exec",
+    "version": "0.153.1",
+    "model": "gpt-5.6-luna",
+    "model_reasoning_effort": "high",
+    "sandbox": "read-only",
+    "ephemeral": true
+  },
+  "fixture": {
+    "path": "tests/fixtures/mini_repo",
+    "files": 10,
+    "symbols": 18,
+    "edges": 26,
+    "index_elapsed_seconds": 0.01
+  },
+  "question": "Where is login defined? Which function calls login? Which database function does login call? Where is retry_payment defined? Answer with exact path:line citations.",
+  "methodology": {
+    "paired_runs": 3,
+    "same_source_tree": true,
+    "same_question": true,
+    "mcp_constraint": "ctx MCP retrieval tools only; no shell or direct file reads",
+    "baseline_constraint": "no MCP or ctx; normal shell search and targeted reads",
+    "user_config_ignored": true,
+    "accuracy_checks_per_run": 4
+  },
+  "variants": {
+    "ctx_mcp": {
+      "runs": [
+        {
+          "elapsed_seconds": 29.45,
+          "input_tokens": 93795,
+          "cached_input_tokens": 71680,
+          "uncached_input_tokens": 22115,
+          "output_tokens": 950,
+          "reasoning_output_tokens": 561,
+          "tool_calls": 4,
+          "tool_payload_tokens": 1733,
+          "accuracy": "4/4"
+        },
+        {
+          "elapsed_seconds": 31.72,
+          "input_tokens": 122518,
+          "cached_input_tokens": 99072,
+          "uncached_input_tokens": 23446,
+          "output_tokens": 968,
+          "reasoning_output_tokens": 522,
+          "tool_calls": 5,
+          "tool_payload_tokens": 1944,
+          "accuracy": "4/4"
+        },
+        {
+          "elapsed_seconds": 32.26,
+          "input_tokens": 119470,
+          "cached_input_tokens": 97024,
+          "uncached_input_tokens": 22446,
+          "output_tokens": 990,
+          "reasoning_output_tokens": 481,
+          "tool_calls": 5,
+          "tool_payload_tokens": 1312,
+          "accuracy": "4/4"
+        }
+      ],
+      "median": {
+        "elapsed_seconds": 31.72,
+        "input_tokens": 119470,
+        "cached_input_tokens": 97024,
+        "uncached_input_tokens": 22446,
+        "output_tokens": 968,
+        "reasoning_output_tokens": 522,
+        "tool_calls": 5,
+        "tool_payload_tokens": 1733
+      }
+    },
+    "shell_baseline": {
+      "runs": [
+        {
+          "elapsed_seconds": 17.56,
+          "input_tokens": 44080,
+          "cached_input_tokens": 34048,
+          "uncached_input_tokens": 10032,
+          "output_tokens": 465,
+          "reasoning_output_tokens": 168,
+          "tool_calls": 2,
+          "accuracy": "4/4"
+        },
+        {
+          "elapsed_seconds": 20.10,
+          "input_tokens": 43817,
+          "cached_input_tokens": 32000,
+          "uncached_input_tokens": 11817,
+          "output_tokens": 546,
+          "reasoning_output_tokens": 207,
+          "tool_calls": 2,
+          "accuracy": "4/4"
+        },
+        {
+          "elapsed_seconds": 22.18,
+          "input_tokens": 44213,
+          "cached_input_tokens": 32000,
+          "uncached_input_tokens": 12213,
+          "output_tokens": 689,
+          "reasoning_output_tokens": 368,
+          "tool_calls": 2,
+          "accuracy": "4/4"
+        }
+      ],
+      "median": {
+        "elapsed_seconds": 20.10,
+        "input_tokens": 44080,
+        "cached_input_tokens": 32000,
+        "uncached_input_tokens": 11817,
+        "output_tokens": 546,
+        "reasoning_output_tokens": 207,
+        "tool_calls": 2
+      }
+    }
+  },
+  "median_delta_ctx_vs_baseline_percent": {
+    "elapsed_seconds": 57.8,
+    "input_tokens": 171.0,
+    "uncached_input_tokens": 90.0,
+    "output_tokens": 77.3,
+    "reasoning_output_tokens": 152.2
+  },
+  "conclusion": "On this ten-file fixture, ctx MCP preserves accuracy but is slower and consumes more tokens because the model uses four to five MCP calls instead of two shell calls. This result should not be extrapolated to large repositories."
+}
