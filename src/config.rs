@@ -1,10 +1,154 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
+use toml_edit::DocumentMut;
 
 pub const MAX_FILE_SIZE: u64 = 1_048_576;
 pub const EXCERPT_SIZE: usize = 800;
+
+#[derive(Debug, Clone)]
+pub struct CacheSettings {
+    pub enabled: bool,
+    pub max_size_mb: u64,
+    pub max_age_days: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddingSettings {
+    pub enabled: bool,
+    pub provider: String,
+    pub model: String,
+    pub endpoint: String,
+    pub api_key_env: String,
+    pub allow_remote_code: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RunnerSettings {
+    pub model: Option<String>,
+    pub effort: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CtxConfig {
+    pub default_harness: Option<String>,
+    pub cache: CacheSettings,
+    pub embeddings: EmbeddingSettings,
+}
+
+impl Default for CtxConfig {
+    fn default() -> Self {
+        Self {
+            default_harness: None,
+            cache: CacheSettings {
+                enabled: true,
+                max_size_mb: 256,
+                max_age_days: 30,
+            },
+            embeddings: EmbeddingSettings {
+                enabled: false,
+                provider: "local".to_owned(),
+                model: String::new(),
+                endpoint: String::new(),
+                api_key_env: String::new(),
+                allow_remote_code: false,
+            },
+        }
+    }
+}
+
+pub fn default_config_text() -> &'static str {
+    "# Set this before using `ctx run --harness auto`.\n# default_harness = \"codex\"\n\n[cache]\nenabled = true\nmax_size_mb = 256\nmax_age_days = 30\n\n[embeddings]\nenabled = false\nprovider = \"local\"\nmodel = \"\"\nendpoint = \"\"\napi_key_env = \"\"\nallow_remote_code = false\n"
+}
+
+pub fn load_config(root: &Path) -> Result<CtxConfig> {
+    let path = ctx_dir(root).join("config.toml");
+    if !path.is_file() {
+        return Ok(CtxConfig::default());
+    }
+    let text = fs::read_to_string(&path)?;
+    let document = DocumentMut::from_str(&text)
+        .with_context(|| format!("configuration TOML invalide: {}", path.display()))?;
+    let mut config = CtxConfig {
+        default_harness: document
+            .get("default_harness")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        ..CtxConfig::default()
+    };
+    if let Some(cache) = document.get("cache").and_then(|value| value.as_table()) {
+        config.cache.enabled = cache
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(config.cache.enabled);
+        config.cache.max_size_mb = cache
+            .get("max_size_mb")
+            .and_then(|value| value.as_integer())
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(config.cache.max_size_mb);
+        config.cache.max_age_days = cache
+            .get("max_age_days")
+            .and_then(|value| value.as_integer())
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(config.cache.max_age_days);
+    }
+    if let Some(embeddings) = document
+        .get("embeddings")
+        .and_then(|value| value.as_table())
+    {
+        config.embeddings.enabled = embeddings
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        config.embeddings.provider = string_value(embeddings, "provider", "local");
+        config.embeddings.model = string_value(embeddings, "model", "");
+        config.embeddings.endpoint = string_value(embeddings, "endpoint", "");
+        config.embeddings.api_key_env = string_value(embeddings, "api_key_env", "");
+        config.embeddings.allow_remote_code = embeddings
+            .get("allow_remote_code")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    }
+    Ok(config)
+}
+
+pub fn runner_settings(root: &Path, harness: &str) -> Result<RunnerSettings> {
+    let path = ctx_dir(root).join("config.toml");
+    let mut settings = RunnerSettings {
+        model: None,
+        effort: "high".to_owned(),
+    };
+    if !path.is_file() {
+        return Ok(settings);
+    }
+    let document = DocumentMut::from_str(&fs::read_to_string(&path)?)?;
+    let Some(table) = document
+        .get("runners")
+        .and_then(|value| value.as_table())
+        .and_then(|runners| runners.get(harness))
+        .and_then(|value| value.as_table())
+    else {
+        return Ok(settings);
+    };
+    settings.model = table
+        .get("model")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    settings.effort = string_value(table, "effort", "high");
+    Ok(settings)
+}
+
+fn string_value(table: &toml_edit::Table, key: &str, default: &str) -> String {
+    table
+        .get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or(default)
+        .to_owned()
+}
 
 pub fn language(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();

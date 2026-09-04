@@ -5,7 +5,9 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
+use crate::config::ctx_dir;
 use crate::gitinfo::git_info;
 use crate::map::{RepositoryMap, build_map};
 use crate::pack::pack_query;
@@ -21,11 +23,13 @@ pub fn generate_briefing(
     let started = Instant::now();
     let info = git_info(root);
     let json_path = out.join("briefing.json");
+    let cache_key = briefing_cache_key(root, &info.sha, intent, focus, harness);
     if json_path.is_file()
         && !force
         && !info.dirty
         && let Ok(mut previous) = read_json(&json_path)
-        && previous.get("sha").and_then(Value::as_str) == Some(&info.sha)
+        && previous.get("cache_key").and_then(Value::as_str) == Some(&cache_key)
+        && cached_paths_exist(root, &previous)
     {
         previous["skipped"] = Value::Bool(true);
         return Ok((previous, true));
@@ -75,6 +79,7 @@ pub fn generate_briefing(
         .collect::<Vec<_>>();
     let mut data = json!({
         "schema": "ctx.briefing.v1",
+        "cache_key": cache_key,
         "repo": root.file_name().and_then(|value| value.to_str()).unwrap_or("repo"),
         "sha": info.sha,
         "dirty": info.dirty,
@@ -119,6 +124,47 @@ pub fn generate_briefing(
     )?;
     fs::write(out.join("briefing.md"), render_markdown(&data)?)?;
     Ok((data, false))
+}
+
+fn briefing_cache_key(
+    root: &Path,
+    sha: &str,
+    intent: &str,
+    focus: Option<&str>,
+    harness: &str,
+) -> String {
+    let config = fs::read(ctx_dir(root).join("config.toml")).unwrap_or_default();
+    let value = json!({
+        "schema": "ctx.briefing.v1",
+        "ctx_version": env!("CARGO_PKG_VERSION"),
+        "sha": sha,
+        "intent": intent,
+        "focus": focus.map(normalize_focus),
+        "harness": harness,
+        "config_hash": format!("{:x}", Sha256::digest(config)),
+    });
+    format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
+}
+
+fn normalize_focus(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn cached_paths_exist(root: &Path, briefing: &Value) -> bool {
+    briefing
+        .get("hits")
+        .and_then(Value::as_array)
+        .is_some_and(|hits| {
+            hits.iter().all(|hit| {
+                hit.get("path")
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| root.join(path).is_file())
+            })
+        })
 }
 
 fn read_json(path: &Path) -> Result<Value> {

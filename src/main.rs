@@ -2,10 +2,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ctx_code::briefing::generate_briefing;
-use ctx_code::config::{ctx_dir, find_ctx, repo_root};
+use ctx_code::cache::CacheStore;
+use ctx_code::config::{ctx_dir, default_config_text, find_ctx, load_config, repo_root};
 use ctx_code::db::{connect, get_meta};
 use ctx_code::gitinfo::git_info;
 use ctx_code::graph::graph_query;
@@ -14,6 +15,7 @@ use ctx_code::indexer::index_repository;
 use ctx_code::map::build_map;
 use ctx_code::model::Envelope;
 use ctx_code::pack::pack_query;
+use ctx_code::runner::{RunOptions, run_question};
 use ctx_code::search::search_index;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -108,6 +110,32 @@ enum Command {
         #[arg(long)]
         compact: bool,
     },
+    /// Ask a non-interactive harness with an exact local cache.
+    Run {
+        question: String,
+        #[arg(long, value_enum, default_value_t = RunHarness::Auto)]
+        harness: RunHarness,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        #[arg(long = "cache", value_enum, default_value_t = CacheMode::Auto)]
+        cache_mode: CacheMode,
+        #[arg(long, default_value_t = 90)]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect or maintain the local response cache.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
+    /// Inspect the future optional embedding layer.
+    Embeddings {
+        #[command(subcommand)]
+        command: EmbeddingsCommand,
+    },
     /// Detect and fetch optional language servers.
     Lsp {
         #[command(subcommand)]
@@ -157,6 +185,47 @@ enum LspCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum CacheCommand {
+    /// Show cache size and hit counters.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove expired and least-recently-used entries.
+    Prune {
+        #[arg(long, default_value_t = 30)]
+        max_age_days: u64,
+        #[arg(long, default_value_t = 256)]
+        max_size_mb: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete cached agent responses.
+    Clear {
+        #[arg(long, default_value = "agent")]
+        kind: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EmbeddingsCommand {
+    /// Show embedding configuration without loading a model or using the network.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reserved explicit setup entrypoint; providers remain disabled for now.
+    Setup {
+        #[arg(long, value_enum)]
+        provider: EmbeddingProvider,
+    },
+    /// Reserved embedding index entrypoint; providers remain disabled for now.
+    Index,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -222,6 +291,28 @@ enum LspLanguage {
     Php,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RunHarness {
+    Auto,
+    Codex,
+    Claude,
+    Opencode,
+    Cursor,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CacheMode {
+    Auto,
+    Off,
+    Refresh,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum EmbeddingProvider {
+    Local,
+    Api,
+}
+
 impl SearchMode {
     fn as_str(self) -> &'static str {
         match self {
@@ -279,6 +370,22 @@ enum_string!(LspLanguage {
     Go => "go",
     Rust => "rust",
     Php => "php"
+});
+enum_string!(RunHarness {
+    Auto => "auto",
+    Codex => "codex",
+    Claude => "claude",
+    Opencode => "opencode",
+    Cursor => "cursor"
+});
+enum_string!(CacheMode {
+    Auto => "auto",
+    Off => "off",
+    Refresh => "refresh"
+});
+enum_string!(EmbeddingProvider {
+    Local => "local",
+    Api => "api"
 });
 
 #[tokio::main]
@@ -399,6 +506,47 @@ async fn execute(cli: Cli) -> Result<()> {
                 ctx_code::mcp::run(root).await
             }
         }
+        Command::Run {
+            question,
+            harness,
+            model,
+            effort,
+            cache_mode,
+            timeout,
+            json,
+        } => {
+            let root = repo_root(".")?;
+            let result = run_question(
+                &root,
+                RunOptions {
+                    question,
+                    harness: harness.as_str().to_owned(),
+                    model,
+                    effort,
+                    cache_mode: cache_mode.as_str().to_owned(),
+                    timeout: Duration::from_secs(timeout.max(1)),
+                },
+            )
+            .await?;
+            if json {
+                emit(&result, true)
+            } else {
+                println!("{}", result.answer);
+                eprintln!(
+                    "ctx: {} via {} in {}ms",
+                    if result.cached {
+                        "cache hit"
+                    } else {
+                        "cache miss"
+                    },
+                    result.harness,
+                    result.duration_ms
+                );
+                Ok(())
+            }
+        }
+        Command::Cache { command } => execute_cache(command),
+        Command::Embeddings { command } => execute_embeddings(command),
         Command::Lsp { command } => execute_lsp(command).await,
         Command::Install(arguments) => execute_harness("install", arguments),
         Command::Update(arguments) => execute_harness("update", arguments),
@@ -408,6 +556,10 @@ async fn execute(cli: Cli) -> Result<()> {
 fn init() -> Result<()> {
     let root = std::env::current_dir()?;
     fs::create_dir_all(ctx_dir(&root))?;
+    let config = ctx_dir(&root).join("config.toml");
+    if !config.exists() {
+        fs::write(&config, default_config_text())?;
+    }
     let ignore = root.join(".ctxignore");
     if !ignore.exists() {
         fs::write(&ignore, "# Additional ctx ignore patterns\n*.generated.*\n")?;
@@ -421,6 +573,63 @@ fn init() -> Result<()> {
     }
     println!("initialized {}", ctx_dir(&root).display());
     Ok(())
+}
+
+fn execute_cache(command: CacheCommand) -> Result<()> {
+    let root = repo_root(".")?;
+    let store = CacheStore::open(&root)?;
+    match command {
+        CacheCommand::Status { json } => {
+            let mut status = store.status()?;
+            let policy = load_config(&root)?.cache;
+            status["enabled"] = json!(policy.enabled);
+            status["max_size_mb"] = json!(policy.max_size_mb);
+            status["max_age_days"] = json!(policy.max_age_days);
+            emit(&status, json)
+        }
+        CacheCommand::Prune {
+            max_age_days,
+            max_size_mb,
+            json,
+        } => emit(
+            &json!({
+                "removed": store.prune(max_age_days, max_size_mb)?,
+                "max_age_days": max_age_days,
+                "max_size_mb": max_size_mb,
+            }),
+            json,
+        ),
+        CacheCommand::Clear { kind, json } => {
+            emit(&json!({"removed": store.clear(&kind)?, "kind": kind}), json)
+        }
+    }
+}
+
+fn execute_embeddings(command: EmbeddingsCommand) -> Result<()> {
+    let root = repo_root(".")?;
+    let settings = load_config(&root)?.embeddings;
+    match command {
+        EmbeddingsCommand::Status { json } => emit(
+            &json!({
+                "enabled": settings.enabled,
+                "provider": settings.provider,
+                "model": settings.model,
+                "endpoint": settings.endpoint,
+                "api_key_env": settings.api_key_env,
+                "allow_remote_code": settings.allow_remote_code,
+                "ready": false,
+                "hint": "embeddings are staged for a later opt-in release; lexical and symbol retrieval remain active"
+            }),
+            json,
+        ),
+        EmbeddingsCommand::Setup { provider } => bail!(
+            "embeddings {} désactivés pour cette version; configurez enabled=false en attendant l'étape opt-in",
+            provider.as_str()
+        ),
+        EmbeddingsCommand::Index => bail!(
+            "embeddings désactivés pour cette version; aucun modèle chargé et aucun réseau utilisé"
+        ),
+    }
 }
 
 fn status() -> Result<Value> {

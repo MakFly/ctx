@@ -1,4 +1,5 @@
 pub mod briefing;
+pub mod cache;
 pub mod config;
 pub mod db;
 pub mod gitinfo;
@@ -11,4 +12,5 @@ pub mod mcp;
 pub mod model;
 pub mod pack;
 pub mod parser;
+pub mod runner;
 pub mod search;

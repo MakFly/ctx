@@ -10,13 +10,18 @@ pub struct GitInfo {
 }
 
 pub fn git_info(root: &Path) -> GitInfo {
-    let sha = git_output(root, &["rev-parse", "--short", "HEAD"])
+    let sha = git_output(root, &["rev-parse", "HEAD"])
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "nogit".to_owned());
     let dirty = git_output(root, &["status", "--porcelain"])
-        .map(|value| !value.is_empty())
+        .map(|value| value.lines().any(|line| !is_ctx_artifact(line)))
         .unwrap_or(false);
     GitInfo { sha, dirty }
+}
+
+fn is_ctx_artifact(status_line: &str) -> bool {
+    let path = status_line.get(3..).unwrap_or_default().trim_matches('"');
+    path == ".ctx" || path.starts_with(".ctx/")
 }
 
 fn git_output(root: &Path, arguments: &[&str]) -> Option<String> {

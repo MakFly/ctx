@@ -163,6 +163,10 @@ fn map_and_briefing_only_reference_real_paths_and_skip_clean_snapshot() {
             .unwrap(),
         before
     );
+
+    let (_, skipped) =
+        generate_briefing(&root, "change", Some("logout"), "none", &out, false).unwrap();
+    assert!(!skipped, "a different focus must invalidate the briefing");
 }
 
 #[test]
