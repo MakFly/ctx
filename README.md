@@ -110,6 +110,10 @@ Run the MCP server directly with:
 ctx mcp
 ```
 
+`ctx mcp --compact` exposes only the one-argument `ctx_pack` fast path used by
+the generated Codex configuration. Other harnesses retain the full four-tool
+server.
+
 ## Command reference
 
 ```console
@@ -206,11 +210,11 @@ Agent-level A/B on the ten-file fixture, using Codex CLI 0.153.1 with
 
 | Variant | Wall time | Input tokens | Output tokens | Tool calls | Accuracy |
 |---|---:|---:|---:|---:|---:|
-| Optimized `ctx_pack` MCP | 17.26 s | 54,844 | 438 | 1 | 4/4 |
+| Compact `ctx_pack` MCP | 16.63 s | 43,999 | 411 | 1 | 4/4 |
 | Shell search baseline | 20.10 s | 44,080 | 546 | 2 | 4/4 |
 
-The MCP path was 14.1% faster here, while still using 24.4% more total input
-tokens. See [the full A/B methodology and pre-optimization
+The MCP path was 17.3% faster here while using 0.2% fewer total input tokens
+and 41.8% fewer uncached input tokens. See [the full A/B methodology and pre-optimization
 result](benchmarks/README.md#codex-exec-ctx-mcp-versus-shell-baseline).
 
 ## Project status

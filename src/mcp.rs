@@ -4,7 +4,7 @@ use globset::Glob;
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Json, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
+    model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
 };
 use rusqlite::Connection;
@@ -47,6 +47,12 @@ pub struct PackRequest {
     pub budget_tokens: usize,
     #[serde(default = "default_intent")]
     pub intent: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CompactPackRequest {
+    #[schemars(description = "Code question; include exact symbol names when known")]
+    pub query: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -176,8 +182,62 @@ impl ServerHandler for CtxMcp {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct CompactCtxMcp {
+    root: PathBuf,
+    tool_router: ToolRouter<Self>,
+}
+
+impl CompactCtxMcp {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            tool_router: Self::tool_router(),
+        }
+    }
+}
+
+#[tool_router]
+impl CompactCtxMcp {
+    #[tool(
+        name = "ctx_pack",
+        description = "One-shot code evidence: definitions, callers, callees, exact citation spans. Call once, then answer.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn ctx_pack(
+        &self,
+        Parameters(request): Parameters<CompactPackRequest>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let envelope = pack_query(&request.query, 800, "explore", &self.root).map_err(mcp_error)?;
+        let body = serde_json::to_string(&envelope).map_err(|error| mcp_error(error.into()))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(body)]))
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for CompactCtxMcp {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions("Call ctx_pack once and cite its exact spans.")
+    }
+}
+
 pub async fn run(root: PathBuf) -> anyhow::Result<()> {
     CtxMcp::new(root)
+        .serve(rmcp::transport::stdio())
+        .await?
+        .waiting()
+        .await?;
+    Ok(())
+}
+
+pub async fn run_compact(root: PathBuf) -> anyhow::Result<()> {
+    CompactCtxMcp::new(root)
         .serve(rmcp::transport::stdio())
         .await?
         .waiting()

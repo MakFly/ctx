@@ -77,26 +77,27 @@ questions, and the ten-file `mini_repo` fixture. The optimized MCP variant
 exposed only `ctx_pack`; the baseline could use normal shell search and
 targeted reads but no MCP. Every run answered all four checked facts correctly.
 
-| Median of 3 runs | MCP before | MCP optimized | Shell baseline | Optimized vs shell |
-|---|---:|---:|---:|---:|
-| Wall time | 31.72 s | 17.26 s | 20.10 s | -14.1% |
-| Input tokens, including cached | 119,470 | 54,844 | 44,080 | +24.4% |
-| Cached input tokens | 97,024 | 42,240 | 32,000 | +32.0% |
-| Uncached input tokens | 22,446 | 12,604 | 11,817 | +6.7% |
-| Output tokens | 968 | 438 | 546 | -19.8% |
-| Reasoning output tokens | 522 | 163 | 207 | -21.3% |
-| Tool calls | 5 | 1 | 2 | -50.0% |
-| Tool payload tokens | 1,733 | 459 | n/a | n/a |
-| Accuracy | 4/4 | 4/4 | 4/4 | equal |
+| Median of 3 runs | MCP before | One-shot structured | Compact MCP | Shell baseline | Compact vs shell |
+|---|---:|---:|---:|---:|---:|
+| Wall time | 31.72 s | 17.26 s | 16.63 s | 20.10 s | -17.3% |
+| Input tokens, including cached | 119,470 | 54,844 | 43,999 | 44,080 | -0.2% |
+| Cached input tokens | 97,024 | 42,240 | 37,120 | 32,000 | +16.0% |
+| Uncached input tokens | 22,446 | 12,604 | 6,879 | 11,817 | -41.8% |
+| Output tokens | 968 | 438 | 411 | 546 | -24.7% |
+| Reasoning output tokens | 522 | 163 | 147 | 207 | -29.0% |
+| Tool calls | 5 | 1 | 1 | 2 | -50.0% |
+| Tool payload tokens | 1,733 | 459 | 459 | n/a | n/a |
+| Accuracy | 4/4 | 4/4 | 4/4 | 4/4 | equal |
 
 The improvement comes from making the pack answer-ready: one request returns
 exact symbol definitions, callers, callees, and explicit citation spans. The
-Codex installer also restricts this MCP to `ctx_pack` and caps that tool's
-output. This removes repeated model/tool round trips. On this small fixture the
-optimized path is faster and uses fewer generated tokens, but MCP still adds
-input context: total input is 24.4% above the shell baseline and uncached input
-is 6.7% above it. The `ctx` engine itself reports 2-10 ms per pack. Larger
-repository evaluation is still required before generalizing the result.
+Codex installer runs `ctx mcp --compact`, which physically exposes only a
+query-only `ctx_pack` tool and avoids returning the same envelope in both text
+and `structuredContent`. This removes repeated model/tool round trips and
+reduces MCP schema/result overhead. On this small fixture the compact path is
+faster and uses fewer tokens than shell search. The `ctx` engine itself reports
+7-16 ms per compact pack in these runs. Larger repository evaluation is still
+required before generalizing the result.
 
 Raw per-run measurements and the exact methodology are in
 [`results/codex-exec-luna-high.json`](results/codex-exec-luna-high.json).

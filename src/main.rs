@@ -103,7 +103,11 @@ enum Command {
         json: bool,
     },
     /// Run the MCP server over stdio.
-    Mcp,
+    Mcp {
+        /// Expose only a minimal one-argument ctx_pack tool.
+        #[arg(long)]
+        compact: bool,
+    },
     /// Detect and fetch optional language servers.
     Lsp {
         #[command(subcommand)]
@@ -387,7 +391,14 @@ async fn execute(cli: Cli) -> Result<()> {
                 Ok(())
             }
         }
-        Command::Mcp => ctx_code::mcp::run(std::env::current_dir()?).await,
+        Command::Mcp { compact } => {
+            let root = std::env::current_dir()?;
+            if compact {
+                ctx_code::mcp::run_compact(root).await
+            } else {
+                ctx_code::mcp::run(root).await
+            }
+        }
         Command::Lsp { command } => execute_lsp(command).await,
         Command::Install(arguments) => execute_harness("install", arguments),
         Command::Update(arguments) => execute_harness("update", arguments),

@@ -366,7 +366,7 @@ fn install_codex_mcp(path: &Path) -> Result<()> {
         text.push_str("\n\n");
     }
     text.push_str(
-        "[mcp_servers.ctx]\ncommand = \"ctx\"\nargs = [\"mcp\"]\nrequired = true\nenabled_tools = [\"ctx_pack\"]\n\n[mcp_servers.ctx.tools.ctx_pack]\noutput_token_limit = 1200\n",
+        "[mcp_servers.ctx]\ncommand = \"ctx\"\nargs = [\"mcp\", \"--compact\"]\nrequired = true\nenabled_tools = [\"ctx_pack\"]\n\n[mcp_servers.ctx.tools.ctx_pack]\noutput_token_limit = 1200\n",
     );
     toml_edit::DocumentMut::from_str(&text)
         .with_context(|| format!("TOML invalide, installation annulée: {}", path.display()))?;

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-09-04T16:36:35Z",
+  "generated_at": "2026-09-04T16:45:21Z",
   "runner": {
     "name": "codex exec",
     "version": "0.153.1",
@@ -25,7 +25,7 @@
     "baseline_constraint": "no MCP or ctx; normal shell search and targeted reads",
     "user_config_ignored": true,
     "accuracy_checks_per_run": 4,
-    "optimized_configuration": "enabled_tools=[ctx_pack], per-tool output_token_limit=1200, server pack budget clamped to 800, answer-ready pack includes exact definitions/callers/callees"
+    "optimized_configuration": "ctx mcp --compact physically exposes one query-only ctx_pack tool, returns one text envelope without duplicate structuredContent, caps the pack at 800 tokens, and includes exact definitions/callers/callees"
   },
   "variants": {
     "ctx_mcp_before": {
@@ -75,7 +75,7 @@
         "tool_payload_tokens": 1733
       }
     },
-    "ctx_mcp_optimized": {
+    "ctx_mcp_one_shot_structured": {
       "runs": [
         {
           "elapsed_seconds": 18.40,
@@ -118,6 +118,53 @@
         "uncached_input_tokens": 12604,
         "output_tokens": 438,
         "reasoning_output_tokens": 163,
+        "tool_calls": 1,
+        "tool_payload_tokens": 459
+      }
+    },
+    "ctx_mcp_optimized_compact": {
+      "runs": [
+        {
+          "elapsed_seconds": 15.89,
+          "input_tokens": 43952,
+          "cached_input_tokens": 42240,
+          "uncached_input_tokens": 1712,
+          "output_tokens": 395,
+          "reasoning_output_tokens": 128,
+          "tool_calls": 1,
+          "tool_payload_tokens": 459,
+          "accuracy": "4/4"
+        },
+        {
+          "elapsed_seconds": 21.36,
+          "input_tokens": 44033,
+          "cached_input_tokens": 37120,
+          "uncached_input_tokens": 6913,
+          "output_tokens": 500,
+          "reasoning_output_tokens": 221,
+          "tool_calls": 1,
+          "tool_payload_tokens": 459,
+          "accuracy": "4/4"
+        },
+        {
+          "elapsed_seconds": 16.63,
+          "input_tokens": 43999,
+          "cached_input_tokens": 37120,
+          "uncached_input_tokens": 6879,
+          "output_tokens": 411,
+          "reasoning_output_tokens": 147,
+          "tool_calls": 1,
+          "tool_payload_tokens": 459,
+          "accuracy": "4/4"
+        }
+      ],
+      "median": {
+        "elapsed_seconds": 16.63,
+        "input_tokens": 43999,
+        "cached_input_tokens": 37120,
+        "uncached_input_tokens": 6879,
+        "output_tokens": 411,
+        "reasoning_output_tokens": 147,
         "tool_calls": 1,
         "tool_payload_tokens": 459
       }
@@ -167,21 +214,21 @@
     }
   },
   "median_delta_optimized_ctx_vs_baseline_percent": {
-    "elapsed_seconds": -14.1,
-    "input_tokens": 24.4,
-    "uncached_input_tokens": 6.7,
-    "output_tokens": -19.8,
-    "reasoning_output_tokens": -21.3,
+    "elapsed_seconds": -17.3,
+    "input_tokens": -0.2,
+    "uncached_input_tokens": -41.8,
+    "output_tokens": -24.7,
+    "reasoning_output_tokens": -29.0,
     "tool_calls": -50.0
   },
   "median_delta_optimized_vs_previous_ctx_percent": {
-    "elapsed_seconds": -45.6,
-    "input_tokens": -54.1,
-    "uncached_input_tokens": -43.8,
-    "output_tokens": -54.8,
-    "reasoning_output_tokens": -68.8,
+    "elapsed_seconds": -47.6,
+    "input_tokens": -63.2,
+    "uncached_input_tokens": -69.4,
+    "output_tokens": -57.5,
+    "reasoning_output_tokens": -71.8,
     "tool_calls": -80.0,
     "tool_payload_tokens": -73.5
   },
-  "conclusion": "On this ten-file fixture, the optimized one-shot ctx MCP path is 14.1% faster than the shell median and preserves 4/4 accuracy. It uses fewer output and reasoning tokens, but 24.4% more total input tokens and 6.7% more uncached input tokens. This result should not be extrapolated to large repositories."
+  "conclusion": "On this ten-file fixture, the compact one-shot ctx MCP path is 17.3% faster than the shell median and preserves 4/4 accuracy. It uses 0.2% fewer total input tokens, 41.8% fewer uncached input tokens, 24.7% fewer output tokens, and 29.0% fewer reasoning tokens. This result should not be extrapolated to large repositories."
 }

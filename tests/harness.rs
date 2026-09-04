@@ -101,6 +101,7 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
     assert!(codex.contains("[mcp_servers.ctx]"));
     assert_eq!(codex.matches("[mcp_servers.ctx]").count(), 1);
     assert!(codex.contains("enabled_tools = [\"ctx_pack\"]"));
+    assert!(codex.contains("args = [\"mcp\", \"--compact\"]"));
     assert_eq!(codex.matches("[mcp_servers.ctx.tools.ctx_pack]").count(), 1);
     assert!(codex.contains("output_token_limit = 1200"));
 

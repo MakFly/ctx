@@ -108,6 +108,54 @@ async fn stdio_server_lists_and_calls_four_tools() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn compact_server_exposes_one_small_text_tool() -> anyhow::Result<()> {
+    let (_temporary, root) = fixture();
+    index_repository(&root)?;
+    let executable = assert_cmd::cargo::cargo_bin!("ctx");
+    let transport = TokioChildProcess::new(tokio::process::Command::new(executable).configure(
+        |command| {
+            command.args(["mcp", "--compact"]).current_dir(&root);
+        },
+    ))?;
+    let client = ().serve(transport).await?;
+    let tools = client.list_all_tools().await?;
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "ctx_pack");
+    assert_eq!(tools[0].input_schema["required"], json!(["query"]));
+    assert_eq!(
+        tools[0].input_schema["properties"]
+            .as_object()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("ctx_pack".to_owned()).with_arguments(
+                json!({"query": "login retry_payment"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await?;
+    assert!(result.structured_content.is_none());
+    let body = result.content[0].as_text().unwrap();
+    let envelope: Value = serde_json::from_str(&body.text)?;
+    assert!(envelope["tokens"].as_u64().unwrap() <= 800);
+    assert!(
+        envelope["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| { hit["path"] == "auth.py" && hit["symbol"] == "login" })
+    );
+    client.cancel().await?;
+    Ok(())
+}
+
 async fn call(
     client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
     name: &str,
