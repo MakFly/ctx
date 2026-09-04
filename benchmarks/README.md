@@ -101,3 +101,18 @@ required before generalizing the result.
 
 Raw per-run measurements and the exact methodology are in
 [`results/codex-exec-luna-high.json`](results/codex-exec-luna-high.json).
+
+## Exact non-interactive response cache
+
+A real `ctx run` integration check used the same Luna/high setup on the clean
+fixture. The first request launched Codex; the second identical request was
+validated and returned from `.ctx/cache.sqlite` without starting a harness.
+
+| Run | Wall time | Input tokens | Output tokens | Result |
+|---|---:|---:|---:|---:|
+| Clean cache miss | 14.50 s | 46,017 | 381 | 2/2 |
+| Exact cache hit | 0.02 s | 0 | 0 | 2/2 |
+
+This is a single end-to-end integration check, not a percentile claim. The
+machine-readable record is
+[`results/codex-run-cache.json`](results/codex-run-cache.json).

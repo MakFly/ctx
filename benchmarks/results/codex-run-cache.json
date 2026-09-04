@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "generated_at": "2026-09-04T17:27:23Z",
+  "runner": {
+    "name": "codex exec",
+    "version": "0.153.1",
+    "model": "gpt-5.6-luna",
+    "model_reasoning_effort": "high"
+  },
+  "fixture": "tests/fixtures/mini_repo",
+  "question": "Where is login defined and what database function does it call?",
+  "runs": {
+    "clean_miss": {
+      "wall_seconds": 14.50,
+      "ctx_duration_ms": 14491,
+      "input_tokens": 46017,
+      "output_tokens": 381,
+      "reasoning_tokens": 171,
+      "accuracy": "2/2"
+    },
+    "exact_hit": {
+      "wall_seconds": 0.02,
+      "ctx_duration_ms": 18,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "reasoning_tokens": 0,
+      "harness_process_started": false,
+      "accuracy": "2/2"
+    }
+  },
+  "note": "One real miss followed by one exact clean-tree cache hit. This integration check is not a percentile benchmark."
+}

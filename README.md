@@ -6,7 +6,8 @@ It indexes a repository into SQLite FTS5, extracts symbols and relationships
 with tree-sitter, and returns small, ranked, source-cited context packs.
 
 No Python runtime, cloud API, account, API key, vector database, or embedding
-model is required.
+model is required for indexing and retrieval. `ctx run` is opt-in and uses the
+credentials of the selected external agent harness.
 
 ## Why ctx?
 
@@ -69,6 +70,7 @@ ctx search login --json
 ctx graph --op callers --symbol login --json
 ctx pack "where is authentication handled?" --json
 ctx explore --intent change --focus "authentication" --harness none
+ctx run "where is authentication handled?" --harness codex --model gpt-5.6-luna --json
 ```
 
 Indexes, maps, and briefings are written below `.ctx/`. `CTX_DIR` can
@@ -114,6 +116,47 @@ ctx mcp
 the generated Codex configuration. Other harnesses retain the full four-tool
 server.
 
+## Cached non-interactive runs
+
+`ctx run` can execute Codex, Claude, OpenCode, or Cursor in non-interactive
+read-only mode. On a clean repository, a verified answer is cached in
+`.ctx/cache.sqlite`; the next identical request returns without launching the
+harness and reports zero new token usage.
+
+Run `ctx install --target opencode` or `ctx install --target cursor` before
+using those adapters so their project MCP configuration is present. Codex and
+Claude receive an isolated compact MCP configuration directly from `ctx run`.
+
+Set a deterministic default and model in `.ctx/config.toml`:
+
+```toml
+default_harness = "codex"
+
+[runners.codex]
+model = "gpt-5.6-luna"
+effort = "high"
+
+[cache]
+enabled = true
+max_size_mb = 256
+max_age_days = 30
+```
+
+Cache reuse is disabled whenever the working tree is dirty. Cache keys include
+the full Git SHA, normalized question, exact model and effort, runner-binary
+fingerprint, ctx prompt version, and evidence-pack digest.
+
+JSON responses expose `cache_lookup_ms`, `harness_ms`, `validation_ms`, and
+token usage so cache effectiveness can be measured without parsing logs.
+
+```console
+ctx run "where is login defined?" --harness auto --json
+ctx run "where is login defined?" --harness codex --model gpt-5.6-luna --cache refresh --json
+ctx cache status --json
+ctx cache prune --max-age-days 30 --max-size-mb 256 --json
+ctx cache clear --kind agent --json
+```
+
 ## Command reference
 
 ```console
@@ -126,10 +169,14 @@ ctx pack QUERY --intent explore|edit|review --json
 ctx map --json
 ctx explore --intent onboard|change|handoff|impact --harness none
 ctx mcp
+ctx run QUESTION --harness auto|codex|claude|opencode|cursor --model MODEL --json
+ctx cache status --json
+ctx cache prune --json
 ctx install --dry-run
 ctx install --target all
 ctx update --dry-run
 ctx update
+ctx embeddings status --json
 ```
 
 ## Optional LSP enrichment
@@ -158,6 +205,13 @@ not run LSP enrichment on an untrusted repository without a sandbox.
 GitHub release downloads are checked against a published SHA-256 digest when
 available. This is an integrity check, not an independent publisher
 attestation.
+
+## Embeddings roadmap
+
+The configuration reserves local and API embedding providers, but embeddings
+remain disabled and no model or network is used. `ctx embeddings status` shows
+the inert configuration. Setup and indexing intentionally fail with a readable
+message until the later opt-in hybrid retrieval release.
 
 ## Development
 
