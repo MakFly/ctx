@@ -2,8 +2,8 @@
 
 **Produit** : runner d'exploration de codebase pour harness d'agents (Claude Code, Codex, OpenCode, Cursor)
 **Livrables associés** : index local ultra-rapide + compte rendu durable
-**Version** : 0.1
-**Statut** : prêt à builder
+**Version** : 0.2
+**Statut** : implémentation Rust
 **Date** : 2026-09-04
 
 ---
@@ -115,12 +115,12 @@ fichiers (.gitignore, skip binaires / >1 Mo)
 
 ### 6.1 Principes
 
-- **MVP** : Python 3.12, package `ctx`, un point d'entrée console. Un harness le ship en 1–2 sessions.
-- **V1.1** : binaire Rust pour L0 n-grams mmap + daemon, même CLI / mêmes schémas. L'API ne change pas.
+- **MVP** : binaire Rust natif `ctx`, un point d'entrée console, SQLite FTS5 embarqué.
+- **V1.1** : n-grams mmap + daemon dans le même moteur Rust, même CLI / mêmes schémas. L'API ne change pas.
 - **Overlay dirty files** : index piné sur HEAD + couche uncommitted. Un agent qui vient d'écrire un fichier doit le retrouver.
-- **Incremental** : 1 fichier modifié = reparse < 200 ms (Python MVP), cible < 100 ms en Rust.
-- **Fallback `rg`** (subprocess ou ripgrepy) si l'index ne peut pas garantir un regex. Le signaler dans `coverage`.
-- **Tree-sitter** sur le hot path. LSP éventuellement en v2 comme refine, jamais comme search.
+- **Incremental** : 1 fichier modifié = reparse cible < 100 ms.
+- **Fallback `rg`** en subprocess si l'index ne peut pas garantir un regex. Le signaler dans `coverage`.
+- **Tree-sitter** sur le hot path. LSP optionnel comme enrichissement explicite, jamais comme search.
 - **L3** (embeddings locaux type Model2Vec / GloVe 50d) hors MVP. Le playbook + BM25 + symboles suffisent pour v1.
 
 ### 6.2 Stockage
@@ -426,7 +426,7 @@ Texte court, impératif, voir le prompt compagnon.
 - `.ctx/briefing.md` + `.ctx/briefing.json` (intent `onboard` + `change`).
 - MCP stdio : `ctx_search`, `ctx_graph`, `ctx_pack`.
 - Skill Claude Code + `ctx install --target claude`.
-- Langages : TS/JS + Python.
+- Langages : TS/JS, Python, Go, Rust et PHP.
 - Bench interne : Recall@5 vs `rg` sur 30 queries du repo cible ; tool-calls / tokens / time-to-first-correct-file.
 
 ### V1.1
@@ -479,7 +479,7 @@ Mesurés sur un repo fixe + 20 tâches d'exploration (trouver un flux, préparer
 - 4 tools MCP max.
 - Briefing = md + json, json source de vérité.
 - Pas d'embeddings dans le MVP.
-- Pas de LSP dans le MVP.
+- LSP optionnels et explicitement activés, jamais dans le hot path.
 - Local-first, zéro cloud.
 - Explore n'est pas un tool MCP.
 - Affirmation sans `path:line` = bug.
@@ -490,7 +490,7 @@ Mesurés sur un repo fixe + 20 tâches d'exploration (trouver un flux, préparer
 
 - Intent prioritaire du premier utilisateur : onboard vs change vs handoff ? (template identique, pondération seule).
 - Committer `.ctx/` dans git, ou le gitignorer par défaut ? Défaut : gitignore, `--commit-brief` optionnel.
-- Langage d'implémentation : Python 3.12 au MVP (vélocité harness). Rust pour L0 n-grams / daemon en v1.1, contrats inchangés.
+- Langage d'implémentation : Rust, non négociable. N-grams mmap / daemon en v1.1, contrats inchangés.
 - Headless harness : `claude -p` est instable selon versions — v1.1, pas MVP.
 
 ---

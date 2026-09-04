@@ -1,7 +1,10 @@
 # ctx local artifacts
 .ctx/
 
-# Python
+# Rust
+target/
+
+# Local environments and caches
 .venv/
 venv/
 __pycache__/
@@ -14,7 +17,7 @@ coverage.xml
 .coverage
 htmlcov/
 
-# Builds and packaging
+# Packaging
 build/
 dist/
 

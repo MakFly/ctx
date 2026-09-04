@@ -1,34 +1,34 @@
-# ctx — local codebase context for coding agents
+# ctx — fast local codebase context for coding agents
 
-`ctx` is a local-first codebase search and exploration tool for Claude Code,
-Codex, OpenCode, Cursor, and other MCP-compatible coding agents. It indexes a
-repository into SQLite FTS5, extracts symbols and relationships with
-tree-sitter, then returns small, ranked, source-cited context packs instead of
-making an agent repeatedly scan the whole repository.
+`ctx` is a Rust-native, local-first codebase search and exploration tool for
+Claude Code, Codex, OpenCode, Cursor, and other MCP-compatible coding agents.
+It indexes a repository into SQLite FTS5, extracts symbols and relationships
+with tree-sitter, and returns small, ranked, source-cited context packs.
 
-No cloud API, account, API key, vector database, or embedding model is required.
+No Python runtime, cloud API, account, API key, vector database, or embedding
+model is required.
 
 ## Why ctx?
 
-Coding agents often spend many tool calls repeating broad Grep, Glob, and Read
-operations. `ctx` turns that exploration into a reusable local index and emits
-token-bounded JSON results with explicit coverage (`complete`, `partial`, or
-`text_only`). It can also generate `.ctx/briefing.json` and a human-readable
-`.ctx/briefing.md` for onboarding, changes, handoffs, and impact analysis.
+Coding agents often repeat broad Grep, Glob, and Read operations. `ctx` turns
+that exploration into a reusable local index and returns token-bounded JSON with
+explicit coverage (`complete`, `partial`, or `text_only`). It also generates
+`.ctx/briefing.json` and `.ctx/briefing.md` for onboarding, changes, handoffs,
+and impact analysis.
 
 ## Features
 
-- Local SQLite FTS5 search with deterministic, definition-first ranking
+- Single native Rust binary
+- Bundled SQLite with FTS5 and deterministic definition-first ranking
 - Tree-sitter symbols, imports, calls, references, callers, and callees
-- Token-bounded `search`, `graph`, and `pack` JSON envelopes
-- Repository maps, entrypoint heuristics, hubs, and lightweight PageRank
-- MCP stdio server with four tools: `ctx_search`, `ctx_graph`, `ctx_pack`, and
-  `ctx_file`
-- Project skills and read-only explorer agents for Claude Code, Codex,
-  OpenCode, and Cursor
-- Harness auto-detection, installation dry-runs, and idempotent updates
-- Optional LSP reference enrichment outside the default search hot path
-- Fully local operation for indexing and retrieval
+- Token-bounded `search`, `graph`, and `pack` envelopes
+- Repository maps, entrypoint and route heuristics, hubs, and PageRank
+- Official Rust MCP SDK with four stdio tools: `ctx_search`, `ctx_graph`,
+  `ctx_pack`, and `ctx_file`
+- Skills and read-only explorer agents for Claude Code, Codex, OpenCode, and
+  Cursor
+- Harness detection, installation dry-runs, and idempotent updates
+- Optional, explicit LSP reference enrichment outside the search hot path
 
 ## Supported languages and frameworks
 
@@ -46,16 +46,17 @@ frameworks do not receive dedicated heuristics.
 
 ## Requirements
 
-- Python 3.12+
-- A Python build with SQLite FTS5 enabled
+- Rust 1.88 or newer to install from source
+- Git, when Git-aware freshness information is wanted
+
+SQLite is bundled into the binary with FTS5 enabled.
 
 ## Install
 
 From a clone:
 
 ```console
-python -m venv .venv
-.venv/bin/pip install -e '.[test]'
+cargo install --path .
 ctx --help
 ```
 
@@ -70,13 +71,12 @@ ctx pack "where is authentication handled?" --json
 ctx explore --intent change --focus "authentication" --harness none
 ```
 
-The local index, repository map, and briefings are written below `.ctx/`.
-`CTX_DIR` can redirect these artifacts, which is useful for tests and isolated
-indexes.
+Indexes, maps, and briefings are written below `.ctx/`. `CTX_DIR` can
+redirect these artifacts for isolated indexes and tests.
 
 ## MCP and agent harness setup
 
-Preview detected harnesses and every planned file change:
+Preview detected harnesses and every planned change:
 
 ```console
 ctx install --dry-run
@@ -89,16 +89,16 @@ supported harnesses:
 ctx install --target all
 ```
 
-Refresh integrations already installed in the project:
+Refresh integrations already present in a project:
 
 ```console
 ctx update --dry-run
 ctx update
 ```
 
-Individual targets are `claude`, `codex`, `opencode`, and `cursor`. The
-`both` alias installs Claude Code and Codex integrations. Existing project
-configuration is merged, and repeated installation is idempotent.
+Individual targets are `claude`, `codex`, `opencode`, and `cursor`.
+Existing JSON and TOML configuration is merged, and repeated installation is
+idempotent.
 
 Run the MCP server directly with:
 
@@ -111,10 +111,10 @@ ctx mcp
 ```console
 ctx init
 ctx index [PATH]
-ctx status
-ctx search QUERY --json
+ctx status --json
+ctx search QUERY --mode auto|text|symbol --json
 ctx graph --op def|refs|callers|callees|path|impact --symbol SYMBOL --json
-ctx pack QUERY --json
+ctx pack QUERY --intent explore|edit|review --json
 ctx map --json
 ctx explore --intent onboard|change|handoff|impact --harness none
 ctx mcp
@@ -127,7 +127,7 @@ ctx update
 ## Optional LSP enrichment
 
 Tree-sitter and FTS5 remain the default offline path. LSP servers are optional
-and must be fetched or selected explicitly:
+and selected explicitly:
 
 ```console
 ctx lsp sources --json
@@ -137,63 +137,51 @@ ctx lsp fetch --language rust
 ctx lsp enrich . --language rust --background
 ```
 
-The current registry supports BasedPyright, TypeScript Native Preview,
-`gopls`, rust-analyzer, and Phpactor. The official Laravel and Symfony language
-servers are not currently integrated. Treat LSP execution as trusted-project
-functionality: a language server may load project configuration, start external
-tools, or execute application code. Do not run LSP enrichment on an untrusted
-repository without an appropriate sandbox.
+The registry supports BasedPyright, TypeScript Native Preview, `gopls`,
+rust-analyzer, and Phpactor. Official Laravel and Symfony language servers are
+not currently integrated.
 
-GitHub release downloads are pinned in the local manifest and checked against a
-published SHA-256 digest when one is available. This is an integrity check, not
-an independent security audit or publisher attestation.
+Treat LSP execution as trusted-project functionality: a language server may
+load project configuration, start external tools, or execute application code.
+The Rust client consumes reference locations only, rejects paths outside the
+repository, and explicitly refuses unsupported server-to-client requests. Do
+not run LSP enrichment on an untrusted repository without a sandbox.
+
+GitHub release downloads are checked against a published SHA-256 digest when
+available. This is an integrity check, not an independent publisher
+attestation.
 
 ## Development
 
 ```console
-.venv/bin/python -m pytest
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
 ```
 
-The acceptance fixture covers Python, JavaScript/TypeScript, Go, Rust, and PHP,
-including indexing, search, graph traversal, context packing, MCP tools,
-briefing generation, harness installation, and optional LSP orchestration.
+The Rust acceptance suite covers indexing, every supported grammar, search,
+graph traversal, context packing, maps, briefing generation, harness
+installation, CLI errors, and the MCP stdio handshake and tool calls.
 
 ## Benchmark
 
-A reproducible synthetic benchmark measures cold indexing, unchanged
-reindexing, search, graph traversal, and context packing on a generated
-Python/TypeScript/Go/Rust/PHP repository:
+The benchmark generates a mixed Python/TypeScript/Go/Rust/PHP repository and
+measures cold indexing, unchanged reindexing, search, graph traversal, and
+context packing:
 
 ```console
-uv run python benchmarks/benchmark.py --files 1000 --iterations 100 \
+cargo run --release --example benchmark -- \
+  --files 1000 \
+  --iterations 100 \
+  --warmups 10 \
   --output benchmarks/results/latest.json
 ```
 
-See [benchmarks/README.md](benchmarks/README.md) for the methodology and
-[the latest committed result](benchmarks/results/latest.json) for exact
-environment details and percentiles. The included ripgrep number is only a raw
-exact-match baseline; it is not equivalent to a ranked graph-aware context
-pack.
-
-Latest reference snapshot: 1,002 indexed files, 2,201 symbols, Python 3.12.14,
-Linux, 100 measured iterations after 10 warmups.
-
-| Operation | Result |
-|---|---:|
-| Cold index | 178.7 ms / 5,607 files/s |
-| Unchanged reindex | 105.5 ms |
-| Symbol search | 1.03 ms p50 / 1.27 ms p99 |
-| Text search | 1.49 ms p50 / 1.75 ms p99 |
-| Definition graph | 0.61 ms p50 / 0.75 ms p99 |
-| Callers graph | 0.79 ms p50 / 0.84 ms p99 |
-| Context pack | 5.58 ms p50 / 7.58 ms p99 |
-
-These are warm-process synthetic measurements, not guarantees for arbitrary
-repositories. The JSON snapshot records the complete environment and raw
-summary statistics.
+See [benchmarks/README.md](benchmarks/README.md) for the methodology. The
+command writes the complete environment and percentiles to the requested JSON
+path. Results are synthetic measurements, not guarantees for every repository.
 
 ## Project status
 
-`ctx` is an early MVP. Symbol resolution and framework detection are
-best-effort, especially for dynamic code. See [PRD.md](PRD.md) for the product
-contract and scope.
+`ctx` is an early MVP. Symbol resolution and framework detection remain
+best-effort for dynamic code. See [PRD.md](PRD.md) for the product contract.
