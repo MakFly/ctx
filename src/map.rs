@@ -99,6 +99,7 @@ pub fn build_map(start: impl AsRef<Path>) -> Result<RepositoryMap> {
 
     let mut links: HashMap<i64, HashSet<i64>> = HashMap::new();
     let mut incoming: HashMap<i64, usize> = HashMap::new();
+    let valid_ids = valid.iter().map(|(id, _)| *id).collect::<HashSet<_>>();
     let mut edge_statement = connection.prepare(
         "SELECT DISTINCT e.file_id,s.file_id
          FROM edges e JOIN symbols s ON s.id=e.dst_symbol_id
@@ -108,6 +109,9 @@ pub fn build_map(start: impl AsRef<Path>) -> Result<RepositoryMap> {
         edge_statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
     {
         let (source, destination) = row?;
+        if !valid_ids.contains(&source) || !valid_ids.contains(&destination) {
+            continue;
+        }
         if links.entry(source).or_default().insert(destination) {
             *incoming.entry(destination).or_default() += 1;
         }

@@ -7,6 +7,8 @@ use anyhow::{Context, Result, bail};
 use toml_edit::DocumentMut;
 
 pub const MAX_FILE_SIZE: u64 = 1_048_576;
+pub const DEFAULT_TEXT_MAX_FILE_SIZE: u64 = 64 * 1024 * 1024;
+pub const DEFAULT_INDEX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 pub const EXCERPT_SIZE: usize = 800;
 
 #[derive(Debug, Clone)]
@@ -240,4 +242,45 @@ pub fn relative_path(path: &Path, root: &Path) -> Result<String> {
         .with_context(|| format!("{} est hors du repo", path.display()))?
         .to_string_lossy()
         .replace('\\', "/"))
+}
+
+/// Shared admission and memory settings for indexing, exact search and watching.
+#[derive(Debug, Clone)]
+pub struct IndexSettings {
+    pub max_file_bytes: u64,
+    pub buffer_bytes: usize,
+}
+
+pub fn index_settings(root: &Path) -> Result<IndexSettings> {
+    let path = ctx_dir(root).join("config.toml");
+    let mut settings = IndexSettings {
+        max_file_bytes: DEFAULT_TEXT_MAX_FILE_SIZE,
+        buffer_bytes: DEFAULT_INDEX_BUFFER_BYTES,
+    };
+    if path.is_file() {
+        let document = fs::read_to_string(path)?.parse::<DocumentMut>()?;
+        if let Some(table) = document.get("index").and_then(|item| item.as_table()) {
+            for (key, destination) in [("max_file_mb", &mut settings.max_file_bytes)] {
+                if let Some(value) = table.get(key) {
+                    let mb = value
+                        .as_integer()
+                        .filter(|mb| *mb > 0)
+                        .with_context(|| format!("index.{key} must be a positive integer"))?;
+                    *destination = (mb as u64)
+                        .checked_mul(1024 * 1024)
+                        .context("index size overflow")?;
+                }
+            }
+            if let Some(value) = table.get("buffer_mb") {
+                let mb = value
+                    .as_integer()
+                    .filter(|mb| *mb > 0)
+                    .context("index.buffer_mb must be a positive integer")?;
+                settings.buffer_bytes = usize::try_from(mb)?
+                    .checked_mul(1024 * 1024)
+                    .context("index buffer size overflow")?;
+            }
+        }
+    }
+    Ok(settings)
 }

@@ -10,6 +10,8 @@ pub struct Symbol {
     pub end: usize,
     pub sig: String,
     pub snippet: String,
+    #[serde(default)]
+    pub snippet_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
@@ -29,8 +31,14 @@ pub struct Hit {
     pub kind: String,
     pub sig: String,
     pub snippet: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub snippet_truncated: bool,
     pub score: f64,
     pub why: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]

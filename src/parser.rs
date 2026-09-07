@@ -135,6 +135,10 @@ fn collect_symbols(
                     .take(300)
                     .collect(),
                 snippet: line_slice(lines, start, end, 2_000),
+                snippet_truncated: lines[start.saturating_sub(1)..end.min(lines.len())]
+                    .join("\n")
+                    .len()
+                    > 2_000,
             });
             if is_container(node.kind()) {
                 children_parents.push(name);

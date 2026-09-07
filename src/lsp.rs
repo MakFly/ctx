@@ -3,7 +3,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -458,7 +458,7 @@ fn enrich_language(
         }),
         timeout,
     )?;
-    process.notify("initialized", json!({}))?;
+    process.notify("initialized", json!({}), timeout)?;
     let mut contents = HashMap::new();
     for (file_id, relative, _) in files {
         let path = root.join(relative);
@@ -479,6 +479,7 @@ fn enrich_language(
                     "text": text,
                 }
             }),
+            timeout,
         )?;
         contents.insert(*file_id, (path, text));
     }
@@ -550,7 +551,7 @@ fn enrich_language(
 
 struct JsonRpcClient {
     child: Child,
-    stdin: ChildStdin,
+    writer: mpsc::Sender<(Vec<u8>, mpsc::SyncSender<std::io::Result<()>>)>,
     receiver: mpsc::Receiver<Result<Value, String>>,
     pending: HashMap<i64, Value>,
     next_id: i64,
@@ -569,11 +570,22 @@ impl JsonRpcClient {
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("impossible de lancer le serveur LSP: {executable}"))?;
-        let stdin = child.stdin.take().context("stdin LSP indisponible")?;
+        let mut stdin = child.stdin.take().context("stdin LSP indisponible")?;
         let stdout = child.stdout.take().context("stdout LSP indisponible")?;
         let stderr_stream = child.stderr.take().context("stderr LSP indisponible")?;
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || read_messages(stdout, sender));
+        let (writer, writes) = mpsc::channel::<(Vec<u8>, mpsc::SyncSender<std::io::Result<()>>)>();
+        thread::spawn(move || {
+            for (payload, reply) in writes {
+                let result = stdin.write_all(&payload).and_then(|()| stdin.flush());
+                let failed = result.is_err();
+                let _ = reply.send(result);
+                if failed {
+                    break;
+                }
+            }
+        });
         let stderr = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&stderr);
         thread::spawn(move || {
@@ -587,7 +599,7 @@ impl JsonRpcClient {
         });
         Ok(Self {
             child,
-            stdin,
+            writer,
             receiver,
             pending: HashMap::new(),
             next_id: 1,
@@ -596,15 +608,21 @@ impl JsonRpcClient {
         })
     }
 
-    fn notify(&mut self, method: &str, parameters: Value) -> Result<()> {
-        self.write(&json!({"jsonrpc": "2.0", "method": method, "params": parameters}))
+    fn notify(&mut self, method: &str, parameters: Value, timeout: Duration) -> Result<()> {
+        self.write(
+            &json!({"jsonrpc": "2.0", "method": method, "params": parameters}),
+            timeout,
+        )
     }
 
     fn request(&mut self, method: &str, parameters: Value, timeout: Duration) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
-        self.write(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": parameters}))?;
         let deadline = Instant::now() + timeout;
+        self.write(
+            &json!({"jsonrpc": "2.0", "id": id, "method": method, "params": parameters}),
+            timeout,
+        )?;
         loop {
             if let Some(message) = self.pending.remove(&id) {
                 return rpc_result(message, method);
@@ -625,7 +643,10 @@ impl JsonRpcClient {
                     )
                 })?;
             if message.get("method").is_some() && message.get("id").is_some() {
-                self.answer_server_request(&message)?;
+                self.answer_server_request(
+                    &message,
+                    deadline.saturating_duration_since(Instant::now()),
+                )?;
             } else if let Some(response_id) = message.get("id").and_then(Value::as_i64) {
                 if response_id == id {
                     return rpc_result(message, method);
@@ -635,22 +656,28 @@ impl JsonRpcClient {
         }
     }
 
-    fn answer_server_request(&mut self, message: &Value) -> Result<()> {
+    fn answer_server_request(&mut self, message: &Value, timeout: Duration) -> Result<()> {
         let response = server_request_response(message, &self.configuration);
-        self.write(&response)
+        self.write(&response, timeout)
     }
 
-    fn write(&mut self, message: &Value) -> Result<()> {
+    fn write(&mut self, message: &Value, timeout: Duration) -> Result<()> {
         let payload = serde_json::to_vec(message)?;
-        write!(self.stdin, "Content-Length: {}\r\n\r\n", payload.len())?;
-        self.stdin.write_all(&payload)?;
-        self.stdin.flush()?;
+        let mut frame = format!("Content-Length: {}\r\n\r\n", payload.len()).into_bytes();
+        frame.extend(payload);
+        let (reply, result) = mpsc::sync_channel(1);
+        self.writer
+            .send((frame, reply))
+            .context("écriture LSP arrêtée")?;
+        result
+            .recv_timeout(timeout)
+            .context("timeout LSP pendant écriture")??;
         Ok(())
     }
 
     fn close(&mut self, timeout: Duration) {
         let _ = self.request("shutdown", json!({}), timeout.min(Duration::from_secs(3)));
-        let _ = self.notify("exit", json!({}));
+        let _ = self.notify("exit", json!({}), timeout.min(Duration::from_secs(3)));
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(3) {
             if self.child.try_wait().ok().flatten().is_some() {
@@ -658,6 +685,14 @@ impl JsonRpcClient {
             }
             thread::sleep(Duration::from_millis(20));
         }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for JsonRpcClient {
+    fn drop(&mut self) {
+        // Also runs for failed initialization, protocol errors and write timeouts.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -1208,6 +1243,48 @@ mod tests {
     use serde_json::json;
 
     use super::{reference_location, select_asset, server_request_response, sources, status};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timeouts_cover_blocked_writes_and_reap_failed_servers() {
+        use super::JsonRpcClient;
+        use std::{
+            path::Path,
+            time::{Duration, Instant},
+        };
+        let root = tempfile::tempdir().unwrap();
+        for bytes in [0, 262_144] {
+            let mut client = JsonRpcClient::start(
+                &[
+                    "python3".to_owned(),
+                    "-c".to_owned(),
+                    "import time; time.sleep(30)".to_owned(),
+                ],
+                root.path(),
+                json!({}),
+            )
+            .unwrap();
+            let pid = client.child.id();
+            let started = Instant::now();
+            let error = client
+                .request(
+                    "initialize",
+                    json!({"text": "x".repeat(bytes)}),
+                    Duration::from_millis(200),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("timeout"));
+            if bytes > 0 {
+                assert!(error.to_string().contains("écriture"));
+            }
+            drop(client);
+            assert!(started.elapsed() < Duration::from_secs(3));
+            assert!(
+                !Path::new(&format!("/proc/{pid}")).exists(),
+                "LSP child was not reaped"
+            );
+        }
+    }
 
     #[test]
     fn sources_are_pinned_to_expected_upstream_repositories() {

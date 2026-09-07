@@ -7,9 +7,21 @@ use regex::Regex;
 
 use crate::graph::graph_query;
 use crate::model::{Envelope, Hit};
-use crate::search::{apply_budget, estimate_tokens, search_index};
+use crate::search::{apply_budget, estimate_tokens, fit_snippet, search_index};
 
 pub fn pack_query(
+    query: &str,
+    budget_tokens: usize,
+    intent: &str,
+    start: impl AsRef<Path>,
+) -> Result<Envelope> {
+    let start = start.as_ref();
+    let generation = crate::watcher::generation(start);
+    let result = pack_query_inner(query, budget_tokens, intent, start)?;
+    Ok(crate::watcher::check_coverage(start, generation, result))
+}
+
+fn pack_query_inner(
     query: &str,
     budget_tokens: usize,
     intent: &str,
@@ -21,17 +33,20 @@ pub fn pack_query(
     if !exact.is_empty() {
         let mut hits = Vec::new();
         let mut relations = Vec::new();
+        let mut incomplete = false;
         for (name, mut definitions) in exact {
-            for hit in &mut definitions {
+            incomplete |= definitions.coverage != "complete";
+            for hit in &mut definitions.hits {
                 set_why(hit, "definition", &name);
             }
-            hits.extend(definitions);
+            hits.extend(definitions.hits);
             for operation in ["callers", "callees"] {
-                let mut related = graph_query(operation, &name, 1, 500, start)?.hits;
-                for hit in &mut related {
+                let mut related = graph_query(operation, &name, 1, 500, start)?;
+                incomplete |= related.coverage != "complete";
+                for hit in &mut related.hits {
                     set_why(hit, relation_name(operation), &name);
                 }
-                relations.extend(related);
+                relations.extend(related.hits);
             }
         }
         let mut hits = unique_hits(hits);
@@ -42,26 +57,8 @@ pub fn pack_query(
         if definitions_cost > budget_tokens {
             let share = budget_tokens / hits.len().max(1);
             for hit in &mut hits {
-                if estimate_tokens(hit) > share && !hit.snippet.is_empty() {
-                    let original = std::mem::take(&mut hit.snippet);
-                    let boundaries = original
-                        .char_indices()
-                        .map(|(index, _)| index)
-                        .chain(std::iter::once(original.len()))
-                        .collect::<Vec<_>>();
-                    let (mut low, mut high) = (0, boundaries.len() - 1);
-                    while low < high {
-                        let middle = (low + high).div_ceil(2);
-                        hit.snippet = original[..boundaries[middle]].to_owned();
-                        if estimate_tokens(hit) <= share {
-                            low = middle;
-                        } else {
-                            high = middle - 1;
-                        }
-                    }
-                    hit.snippet = original[..boundaries[low]].to_owned();
-                    shortened |= hit.snippet.len() < original.len();
-                }
+                fit_snippet(hit, share);
+                shortened |= hit.snippet_truncated;
             }
         }
         hits.extend(relations);
@@ -69,16 +66,16 @@ pub fn pack_query(
             unique_hits(hits),
             budget_tokens,
             started,
-            "complete",
+            if incomplete { "partial" } else { "complete" },
             Some(
                 "answer-ready: exact definitions, callers, and callees are included; cite each hit's path:start-end from why exactly, and do not call another retrieval tool unless a requested fact is absent"
                     .to_owned(),
             ),
         );
-        if shortened || envelope.coverage != "complete" {
+        if shortened || incomplete || envelope.coverage != "complete" {
             envelope.coverage = "partial".to_owned();
             envelope.hint = Some(
-                "partial context: budget omitted or shortened evidence; cite the returned spans and retrieve any missing requested facts"
+                "partial context: static relations are best-effort or evidence was omitted/shortened; verify any missing requested facts"
                     .to_owned(),
             );
         }
@@ -86,6 +83,7 @@ pub fn pack_query(
     }
 
     let search = search_index(query, "auto", None, 10, budget_tokens.max(600), start)?;
+    let mut incomplete = search.coverage != "complete";
     let mut hits = search.hits.clone();
     let symbols =
         hits.iter()
@@ -98,8 +96,9 @@ pub fn pack_query(
             });
     for name in symbols {
         for operation in ["def", "callers", "callees"] {
-            let mut related = graph_query(operation, &name, 1, 500, start)?.hits;
-            for hit in &mut related {
+            let mut related = graph_query(operation, &name, 1, 500, start)?;
+            incomplete |= related.coverage != "complete";
+            for hit in &mut related.hits {
                 let relation = if operation == "def" {
                     "definition"
                 } else {
@@ -107,7 +106,7 @@ pub fn pack_query(
                 };
                 set_why(hit, relation, &name);
             }
-            hits.extend(related);
+            hits.extend(related.hits);
         }
     }
     let priority = |kind: &str| match kind {
@@ -152,12 +151,16 @@ pub fn pack_query(
         unique_hits(hits),
         budget_tokens,
         started,
-        &search.coverage,
+        if incomplete {
+            "partial"
+        } else {
+            &search.coverage
+        },
         search.hint,
     ))
 }
 
-fn exact_symbols(query: &str, start: &Path) -> Result<Vec<(String, Vec<Hit>)>> {
+fn exact_symbols(query: &str, start: &Path) -> Result<Vec<(String, Envelope)>> {
     let identifier = Regex::new(r"[A-Za-z_][A-Za-z0-9_.]*")?;
     let mut candidates = HashSet::new();
     let mut matches = Vec::new();
@@ -173,17 +176,7 @@ fn exact_symbols(query: &str, start: &Path) -> Result<Vec<(String, Vec<Hit>)>> {
         if definitions.hits.is_empty() {
             continue;
         }
-        let name = definitions.hits[0]
-            .symbol
-            .clone()
-            .unwrap_or_else(|| value.to_owned());
-        if matches
-            .iter()
-            .any(|(existing, _): &(String, Vec<Hit>)| existing == &name)
-        {
-            continue;
-        }
-        matches.push((name, definitions.hits));
+        matches.push((value.to_owned(), definitions));
         if matches.len() >= 6 {
             break;
         }

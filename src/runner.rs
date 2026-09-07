@@ -17,7 +17,7 @@ use crate::indexer::index_repository;
 use crate::model::Envelope;
 use crate::pack::pack_query;
 
-const PROMPT_VERSION: &str = "ctx-run-v1";
+const PROMPT_VERSION: &str = "ctx-run-v4-fulltext";
 const HARNESSES: &[&str] = &["codex", "claude", "opencode", "cursor"];
 
 struct CacheIdentity<'a> {
@@ -77,6 +77,7 @@ pub async fn run_question(root: &Path, options: RunOptions) -> Result<AgentResul
         )
     });
     let store = CacheStore::open(root)?;
+    store.prune(config.cache.max_age_days, config.cache.max_size_mb)?;
 
     let cache_lookup_started = Instant::now();
     let key = cache_request.as_ref().map(|request| request.key.as_str());
@@ -107,6 +108,25 @@ pub async fn run_question(root: &Path, options: RunOptions) -> Result<AgentResul
         let wait_started = Instant::now();
         loop {
             if store.acquire_lease(key, &owner, options.timeout.as_secs() + 30)? {
+                // The previous owner can publish between our lookup and the
+                // acquisition. Owning its released lease does not imply a miss.
+                if options.cache_mode != "refresh" {
+                    let lookup = store.lookup(key);
+                    if lookup.is_err() {
+                        store.release(key, &owner)?;
+                    }
+                    if let Some(mut cached) = lookup?
+                        && valid_cached_result(root, &cached)
+                    {
+                        store.release(key, &owner)?;
+                        cached.cached = true;
+                        cached.duration_ms = started.elapsed().as_millis();
+                        cached.cache_lookup_ms = cache_lookup_started.elapsed().as_millis();
+                        cached.harness_ms = 0;
+                        cached.usage = TokenUsage::default();
+                        return Ok(cached);
+                    }
+                }
                 break;
             }
             if options.cache_mode != "refresh"
@@ -369,9 +389,11 @@ async fn execute_harness(
                 "--output-format",
                 "json",
                 "--permission-mode",
-                "plan",
+                "dontAsk",
                 "--permission-prompts",
                 "none",
+                "--tools",
+                "",
                 "--no-session-persistence",
                 "--strict-mcp-config",
                 "--mcp-config",
@@ -384,7 +406,21 @@ async fn execute_harness(
             command.arg(&prompt);
         }
         "opencode" => {
-            command.args(["run", "--format", "json", "--dir"]);
+            let agent = format!(
+                "ctx-readonly-{}",
+                output_file.file_stem().unwrap().to_string_lossy()
+            );
+            let current = std::env::current_exe()?;
+            command.env("OPENCODE_CONFIG_CONTENT", json!({
+                "agent": { (agent.clone()): {
+                    "mode": "primary",
+                    "permission": { "*": "deny", "ctx_ctx_pack": "allow" }
+                }},
+                "mcp": { "ctx": { "type": "local", "command": [current, "mcp", "--compact"], "enabled": true } }
+            }).to_string());
+            command.args([
+                "run", "--pure", "--agent", &agent, "--format", "json", "--dir",
+            ]);
             command.arg(root);
             command.args(["--variant", effort]);
             if let Some(model) = model {
@@ -393,7 +429,7 @@ async fn execute_harness(
             command.arg(&prompt);
         }
         "cursor" => {
-            command.args(["-p", "--output-format", "json"]);
+            command.args(["-p", "--mode", "ask", "--output-format", "json"]);
             if let Some(model) = model {
                 command.args(["--model", model]);
             }
@@ -546,7 +582,7 @@ fn build_cache_request(
     let request = json!({
         "repo": root.to_string_lossy(),
         "sha": sha,
-        "question": normalize_question(question),
+        "question": question,
         "harness": identity.harness,
         "harness_version": identity.harness_version,
         "model": identity.model,
@@ -607,14 +643,6 @@ fn pack_digest(pack: &Envelope) -> String {
     format!("{:x}", Sha256::digest(stable.to_string().as_bytes()))
 }
 
-fn normalize_question(question: &str) -> String {
-    question
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
 fn valid_cached_result(root: &Path, result: &AgentResult) -> bool {
     if result.hits.is_empty() || !result.hits.iter().all(|hit| root.join(&hit.path).is_file()) {
         return false;
@@ -650,6 +678,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cache_identity_preserves_case_and_whitespace_inside_literals() {
+        let root = tempfile::tempdir().unwrap();
+        let pack = Envelope::empty("complete", None);
+        let key = |question| {
+            build_cache_request(
+                root.path(),
+                "sha",
+                question,
+                CacheIdentity {
+                    harness: "codex",
+                    harness_version: "fake",
+                    model: "fake",
+                    effort: "high",
+                },
+                &pack,
+            )
+            .key
+        };
+        assert_ne!(key("Accept 'TOKEN'?"), key("Accept 'token'?"));
+        assert_ne!(key("Accept 'a  b'?"), key("Accept 'a b'?"));
+        assert_eq!(key("Accept 'TOKEN'?"), key("Accept 'TOKEN'?"));
+    }
+
+    #[test]
     fn extracts_common_harness_answers_and_usage() {
         let output = r#"{"type":"assistant","message":{"content":[{"text":"first"}]}}
 {"type":"result","result":"auth.py:5-7","usage":{"input_tokens":12,"output_tokens":3}}"#;
@@ -669,6 +721,8 @@ mod tests {
         fs::write(
             &fake,
             r#"#!/bin/sh
+printf '%s\n' "$@" > "$0.args"
+printf '%s' "${OPENCODE_CONFIG_CONTENT-}" > "$0.config"
 out=""
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--output-last-message" ]; then shift; out="$1"; fi
@@ -696,6 +750,37 @@ echo '{"type":"result","result":"auth.py:5-7","usage":{"input_tokens":12,"output
             .unwrap();
             assert_eq!(answer, "auth.py:5-7", "adapter {harness}");
             assert_eq!(usage.input_tokens, Some(12));
+            let args = fs::read_to_string(fake.with_extension("args")).unwrap();
+            let args = args.lines().collect::<Vec<_>>();
+            if *harness == "claude" {
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair == ["--permission-mode", "dontAsk"])
+                );
+                assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
+                assert!(
+                    args.windows(2)
+                        .any(|pair| pair == ["--allowedTools", "mcp__ctx__ctx_pack"])
+                );
+                assert!(args.contains(&"--strict-mcp-config"));
+            }
+            if *harness == "opencode" {
+                assert!(args.contains(&"--pure"));
+                let agent = args[args.iter().position(|arg| *arg == "--agent").unwrap() + 1];
+                let config: Value = serde_json::from_str(
+                    &fs::read_to_string(fake.with_extension("config")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    config["agent"][agent]["permission"],
+                    json!({"*": "deny", "ctx_ctx_pack": "allow"})
+                );
+                assert_eq!(config["mcp"]["ctx"]["command"][2], "--compact");
+            }
+            if *harness == "cursor" {
+                assert!(args.windows(2).any(|pair| pair == ["--mode", "ask"]));
+                assert!(!args.contains(&"--force"));
+            }
         }
     }
 }

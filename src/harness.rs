@@ -254,7 +254,7 @@ fn copy_skill(destination: &Path) -> Result<()> {
 }
 
 fn append_once(path: &Path, snippet: &str) -> Result<()> {
-    let current = fs::read_to_string(path).unwrap_or_default();
+    let current = read_existing(path)?;
     let block = format!("{BEGIN}\n{}\n{END}", snippet.trim_end());
     let updated = match (current.find(BEGIN), current.find(END)) {
         (Some(start), Some(end)) if start <= end => {
@@ -347,7 +347,7 @@ fn install_opencode_mcp(path: &Path) -> Result<()> {
 }
 
 fn install_codex_mcp(path: &Path) -> Result<()> {
-    let current = fs::read_to_string(path).unwrap_or_default();
+    let current = read_existing(path)?;
     let mut lines = current.lines().map(str::to_owned).collect::<Vec<_>>();
     if let Some(start) = lines
         .iter()
@@ -371,6 +371,14 @@ fn install_codex_mcp(path: &Path) -> Result<()> {
     toml_edit::DocumentMut::from_str(&text)
         .with_context(|| format!("TOML invalide, installation annulée: {}", path.display()))?;
     write(path.to_path_buf(), &text)
+}
+
+fn read_existing(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error).with_context(|| format!("lecture impossible: {}", path.display())),
+    }
 }
 
 fn write(path: PathBuf, contents: &str) -> Result<()> {

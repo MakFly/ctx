@@ -14,3 +14,5 @@ pub mod pack;
 pub mod parser;
 pub mod runner;
 pub mod search;
+pub mod text_index;
+pub mod watcher;

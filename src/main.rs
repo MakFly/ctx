@@ -11,12 +11,11 @@ use ctx_code::db::{connect, get_meta};
 use ctx_code::gitinfo::git_info;
 use ctx_code::graph::graph_query;
 use ctx_code::harness::{install, installation_plan};
-use ctx_code::indexer::index_repository;
 use ctx_code::map::build_map;
 use ctx_code::model::Envelope;
 use ctx_code::pack::pack_query;
 use ctx_code::runner::{RunOptions, run_question};
-use ctx_code::search::search_index;
+use ctx_code::search::search_index_with_options;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -41,6 +40,9 @@ enum Command {
         path: PathBuf,
         #[arg(long)]
         watch: bool,
+        /// Verify file contents even when size and modification time are unchanged.
+        #[arg(long)]
+        force: bool,
     },
     /// Show index and Git freshness.
     Status {
@@ -52,6 +54,9 @@ enum Command {
         query: String,
         #[arg(long, value_enum, default_value_t = SearchMode::Auto)]
         mode: SearchMode,
+        /// Fold Unicode case in literal/regex searches.
+        #[arg(long)]
+        ignore_case: bool,
         #[arg(long)]
         path: Option<String>,
         #[arg(long, default_value_t = 20)]
@@ -243,6 +248,8 @@ enum SearchMode {
     Auto,
     Text,
     Symbol,
+    Literal,
+    Regex,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -319,6 +326,8 @@ impl SearchMode {
             Self::Auto => "auto",
             Self::Text => "text",
             Self::Symbol => "symbol",
+            Self::Literal => "literal",
+            Self::Regex => "regex",
         }
     }
 }
@@ -399,11 +408,15 @@ async fn main() {
 async fn execute(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init => init(),
-        Command::Index { path, watch } => {
+        Command::Index { path, watch, force } => {
             if watch {
-                eprintln!("ctx: --watch est optionnel au MVP; index unique effectué");
+                let root = path.canonicalize()?;
+                let _session = ctx_code::watcher::WatchSession::start_with_force(&root, force)?;
+                eprintln!("ctx: watching {}; Ctrl-C to stop", root.display());
+                tokio::signal::ctrl_c().await?;
+                return Ok(());
             }
-            let result = index_repository(path)?;
+            let result = ctx_code::indexer::index_repository_with_options(path, force)?;
             println!(
                 "indexed {} files ({} changed), {} symbols, {} edges",
                 result.files, result.changed, result.symbols, result.edges
@@ -415,14 +428,16 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::Search {
             query,
             mode,
+            ignore_case,
             path,
             limit,
             budget_tokens,
             json,
         } => emit_envelope(
-            &search_index(
+            &search_index_with_options(
                 &query,
                 mode.as_str(),
+                ignore_case,
                 path.as_deref(),
                 limit.max(1),
                 budget_tokens.max(1),
@@ -469,9 +484,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 harness = "none".to_owned();
             }
             let root = repo_root(".")?;
-            if !ctx_dir(&root).join("index.sqlite").is_file() {
-                index_repository(&root)?;
-            }
+            ctx_code::indexer::index_repository_with_options(&root, force)?;
             let (data, skipped) = generate_briefing(
                 &root,
                 intent.as_str(),
@@ -486,7 +499,7 @@ async fn execute(cli: Cli) -> Result<()> {
                 println!(
                     "{}",
                     if skipped {
-                        "briefing unchanged (same clean SHA)".to_owned()
+                        "briefing unchanged (same indexed content and repository state)".to_owned()
                     } else {
                         format!(
                             "wrote {} then {}",
@@ -668,6 +681,7 @@ fn status() -> Result<Value> {
         }
     }
     let info = git_info(&root);
+    let watch = ctx_code::watcher::status(&root);
     Ok(json!({
         "sha": info.sha,
         "indexed_sha": get_meta(&connection, "indexed_sha", "")?,
@@ -679,6 +693,14 @@ fn status() -> Result<Value> {
         "database": database,
         "size_bytes": fs::metadata(&database)?.len(),
         "stale": stale,
+        "text_generation": get_meta(&connection, "text_generation", "")?,
+        "previous_text_generation": get_meta(&connection, "previous_text_generation", "")?,
+        "excluded_too_large": get_meta(&connection, "excluded_too_large", "0")?.parse::<u64>().unwrap_or(0),
+        "text_max_file_bytes": get_meta(&connection, "text_max_file_bytes", "0")?.parse::<u64>().unwrap_or(0),
+        "watcher": watch["watcher"],
+        "catching_up": watch["catching_up"],
+        "last_reconciliation_ms": watch["last_reconciliation_ms"],
+        "watcher_error": watch["error"],
     }))
 }
 

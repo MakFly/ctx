@@ -34,15 +34,18 @@ fn main() -> Result<()> {
     let started = Instant::now();
     let cold = index_repository(&root)?;
     let cold_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    let cold_peak_rss_bytes = peak_rss_bytes();
     let started = Instant::now();
     let unchanged = index_repository(&root)?;
     let unchanged_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    let unchanged_peak_rss_bytes = peak_rss_bytes();
 
     let mut metrics = serde_json::Map::new();
     metrics.insert(
         "index_cold".to_owned(),
         json!({
             "elapsed_ms": round(cold_ms),
+            "peak_process_rss_bytes": cold_peak_rss_bytes,
             "files_per_second": round(cold.files as f64 / (cold_ms / 1_000.0)),
         }),
     );
@@ -51,6 +54,7 @@ fn main() -> Result<()> {
         json!({
             "elapsed_ms": round(unchanged_ms),
             "changed_files": unchanged.changed,
+            "peak_process_rss_bytes": unchanged_peak_rss_bytes,
         }),
     );
     metrics.insert(
@@ -73,6 +77,28 @@ fn main() -> Result<()> {
             search_index("payment retry ledger", "auto", None, 20, 1_500, &root).map(|_| ())
         })?,
     );
+    for mode in ["literal", "regex"] {
+        let pattern = if mode == "literal" {
+            "payment"
+        } else {
+            "payment.*ledger"
+        };
+        for indexed in [false, true] {
+            let label = format!("{mode}_{}", if indexed { "trigram" } else { "scan" });
+            metrics.insert(
+                label,
+                measure(arguments.iterations, arguments.warmups, |_| {
+                    let search = if indexed {
+                        ctx_code::text_index::exact_search
+                    } else {
+                        ctx_code::text_index::scan_search
+                    };
+                    search(pattern, mode, false, None, usize::MAX, usize::MAX, &root).map(|_| ())
+                })?,
+            );
+        }
+    }
+
     metrics.insert(
         "graph_def".to_owned(),
         measure(arguments.iterations, arguments.warmups, |_| {
@@ -130,10 +156,13 @@ fn main() -> Result<()> {
             "symbols": cold.symbols,
             "edges": cold.edges,
             "database_bytes": cold.database.metadata()?.len(),
+            "trigram_bytes": directory_bytes(&root.join(".ctx/text")),
         },
         "metrics": metrics,
         "notes": [
             "All retrieval measurements are warm-process timings.",
+            "Exact scan and trigram variants use identical patterns, admission, matcher and unlimited output budgets.",
+            "RSS is the process lifetime high-water mark on Linux, not an isolated per-phase allocation measurement; null elsewhere.",
             "The benchmark calls the same Rust library used by the persistent MCP server.",
             "Synthetic results do not predict performance on every real repository.",
         ],
@@ -326,4 +355,26 @@ mod tests {
         let timings = measure(2, 1, |_| Ok(())).unwrap();
         assert!(timings["p50_ms"].is_number());
     }
+}
+
+fn directory_bytes(path: &Path) -> u64 {
+    walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+fn peak_rss_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    status.lines().find_map(|line| {
+        line.strip_prefix("VmHWM:")?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
+    })
 }

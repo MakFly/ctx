@@ -45,6 +45,9 @@ async fn stdio_server_lists_and_calls_four_tools() -> anyhow::Result<()> {
     names.sort();
     assert_eq!(names, ["ctx_file", "ctx_graph", "ctx_pack", "ctx_search"]);
     for tool in &tools {
+        if tool.name == "ctx_search" {
+            assert!(tool.output_schema.is_some());
+        }
         let annotations = tool.annotations.as_ref().expect("missing tool annotations");
         assert_eq!(annotations.read_only_hint, Some(true));
         assert_eq!(annotations.destructive_hint, Some(false));
@@ -88,7 +91,13 @@ async fn stdio_server_lists_and_calls_four_tools() -> anyhow::Result<()> {
     )
     .await?;
     assert!(one_shot["tokens"].as_u64().unwrap() <= 800);
-    assert_eq!(one_shot["coverage"], "complete");
+    assert_eq!(one_shot["coverage"], "partial");
+    assert!(
+        !one_shot["hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("answer-ready:")
+    );
     assert!(one_shot["hits"].as_array().unwrap().iter().any(|hit| {
         hit["path"] == "db.py"
             && hit["why"]
@@ -99,6 +108,32 @@ async fn stdio_server_lists_and_calls_four_tools() -> anyhow::Result<()> {
     let files = call(&client, "ctx_file", json!({"q": "auth"})).await?;
     assert!(
         files["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["path"] == "auth.py")
+    );
+    let literal = call(
+        &client,
+        "ctx_search",
+        json!({"query":"LOGIN", "mode":"literal", "ignore_case":true}),
+    )
+    .await?;
+    assert!(
+        literal["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["path"] == "auth.py")
+    );
+    let regex = call(
+        &client,
+        "ctx_search",
+        json!({"query":"def login", "mode":"regex"}),
+    )
+    .await?;
+    assert!(
+        regex["hits"]
             .as_array()
             .unwrap()
             .iter()
@@ -166,5 +201,11 @@ async fn call(
         .call_tool(CallToolRequestParams::new(name.to_owned()).with_arguments(arguments))
         .await?;
     assert_ne!(result.is_error, Some(true));
+    if name == "ctx_search" {
+        assert!(
+            result.content.is_empty(),
+            "modern search duplicated its payload"
+        );
+    }
     Ok(result.structured_content.unwrap())
 }

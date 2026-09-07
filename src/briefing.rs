@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config::ctx_dir;
+use crate::db::connect;
 use crate::gitinfo::git_info;
 use crate::map::{RepositoryMap, build_map};
 use crate::pack::pack_query;
@@ -23,7 +24,7 @@ pub fn generate_briefing(
     let started = Instant::now();
     let info = git_info(root);
     let json_path = out.join("briefing.json");
-    let cache_key = briefing_cache_key(root, &info.sha, intent, focus, harness);
+    let cache_key = briefing_cache_key(root, &info.sha, intent, focus, harness)?;
     if json_path.is_file()
         && !force
         && !info.dirty
@@ -132,26 +133,29 @@ fn briefing_cache_key(
     intent: &str,
     focus: Option<&str>,
     harness: &str,
-) -> String {
+) -> Result<String> {
     let config = fs::read(ctx_dir(root).join("config.toml")).unwrap_or_default();
+    let connection = connect(&ctx_dir(root).join("index.sqlite"), false)?;
+    let mut statement = connection.prepare("SELECT path,content_hash FROM files ORDER BY path")?;
+    let files = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let value = json!({
-        "schema": "ctx.briefing.v1",
+        "schema": "ctx.briefing.cache.v2",
         "ctx_version": env!("CARGO_PKG_VERSION"),
         "sha": sha,
         "intent": intent,
-        "focus": focus.map(normalize_focus),
+        "focus": focus,
+        "indexed_files": files,
         "harness": harness,
         "config_hash": format!("{:x}", Sha256::digest(config)),
     });
-    format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
-}
-
-fn normalize_focus(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(value.to_string().as_bytes())
+    ))
 }
 
 fn cached_paths_exist(root: &Path, briefing: &Value) -> bool {

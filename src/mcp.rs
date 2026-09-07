@@ -2,10 +2,12 @@ use std::path::{Path, PathBuf};
 
 use globset::Glob;
 use rmcp::{
-    ErrorData, ServerHandler, ServiceExt,
+    ErrorData, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Json, wrapper::Parameters},
     model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
+    schemars,
+    service::RequestContext,
+    tool, tool_handler, tool_router,
 };
 use rusqlite::Connection;
 use schemars::JsonSchema;
@@ -16,7 +18,7 @@ use crate::db::connect;
 use crate::graph::graph_query;
 use crate::model::{Envelope, Hit};
 use crate::pack::pack_query;
-use crate::search::search_index;
+use crate::search::search_index_with_options;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchRequest {
@@ -24,6 +26,8 @@ pub struct SearchRequest {
     pub query: String,
     #[serde(default = "default_mode")]
     pub mode: String,
+    #[serde(default)]
+    pub ignore_case: bool,
     pub path: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: usize,
@@ -81,7 +85,8 @@ impl CtxMcp {
 impl CtxMcp {
     #[tool(
         name = "ctx_search",
-        description = "Search code symbols and bounded excerpts.",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<Envelope>(),
+        description = "Search symbols and full text. Modes: auto, text, symbol, literal, regex; ignore_case applies to literal/regex.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -92,17 +97,25 @@ impl CtxMcp {
     fn ctx_search(
         &self,
         Parameters(request): Parameters<SearchRequest>,
-    ) -> Result<Json<Envelope>, ErrorData> {
-        search_index(
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::watcher::before_request(&self.root).map_err(mcp_error)?;
+        search_index_with_options(
             &request.query,
             &request.mode,
+            request.ignore_case,
             request.path.as_deref(),
             request.limit,
             request.budget_tokens,
             &self.root,
         )
-        .map(Json)
         .map_err(mcp_error)
+        .and_then(|envelope| {
+            let structured_only = context.peer.peer_info().is_some_and(|info| {
+                info.protocol_version >= rmcp::model::ProtocolVersion::V_2025_06_18
+            });
+            search_response(envelope, structured_only)
+        })
     }
 
     #[tool(
@@ -119,6 +132,7 @@ impl CtxMcp {
         &self,
         Parameters(request): Parameters<GraphRequest>,
     ) -> Result<Json<Envelope>, ErrorData> {
+        crate::watcher::before_request(&self.root).map_err(mcp_error)?;
         graph_query(
             &request.op,
             &request.symbol,
@@ -144,6 +158,7 @@ impl CtxMcp {
         &self,
         Parameters(request): Parameters<PackRequest>,
     ) -> Result<Json<Envelope>, ErrorData> {
+        crate::watcher::before_request(&self.root).map_err(mcp_error)?;
         pack_query(
             &request.query,
             request.budget_tokens.min(800),
@@ -168,10 +183,25 @@ impl CtxMcp {
         &self,
         Parameters(request): Parameters<FileRequest>,
     ) -> Result<Json<Envelope>, ErrorData> {
+        crate::watcher::before_request(&self.root).map_err(mcp_error)?;
         file_query(&self.root, &request.q, request.limit)
             .map(Json)
             .map_err(mcp_error)
     }
+}
+
+// Modern MCP clients can consume the advertised structured output directly.
+// Keep the full text fallback for clients predating structured tool results.
+fn search_response(envelope: Envelope, structured_only: bool) -> Result<CallToolResult, ErrorData> {
+    let value = serde_json::to_value(envelope).map_err(|error| mcp_error(error.into()))?;
+    if !structured_only {
+        return Ok(CallToolResult::structured(value));
+    }
+    // Do not construct CallToolResult::structured and then clear content: that
+    // would still serialize the entire redundant text copy before discarding it.
+    let mut result = CallToolResult::success(Vec::new());
+    result.structured_content = Some(value);
+    Ok(result)
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -213,6 +243,7 @@ impl CompactCtxMcp {
         &self,
         Parameters(request): Parameters<CompactPackRequest>,
     ) -> Result<CallToolResult, ErrorData> {
+        crate::watcher::before_request(&self.root).map_err(mcp_error)?;
         let envelope = pack_query(&request.query, 800, "explore", &self.root).map_err(mcp_error)?;
         let body = serde_json::to_string(&envelope).map_err(|error| mcp_error(error.into()))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(body)]))
@@ -228,6 +259,8 @@ impl ServerHandler for CompactCtxMcp {
 }
 
 pub async fn run(root: PathBuf) -> anyhow::Result<()> {
+    let _watch = crate::watcher::WatchSession::start(&root)?;
+    let _readers = crate::text_index::ReaderSession::start(&root)?;
     CtxMcp::new(root)
         .serve(rmcp::transport::stdio())
         .await?
@@ -237,6 +270,8 @@ pub async fn run(root: PathBuf) -> anyhow::Result<()> {
 }
 
 pub async fn run_compact(root: PathBuf) -> anyhow::Result<()> {
+    let _watch = crate::watcher::WatchSession::start(&root)?;
+    let _readers = crate::text_index::ReaderSession::start(&root)?;
     CompactCtxMcp::new(root)
         .serve(rmcp::transport::stdio())
         .await?
@@ -280,6 +315,7 @@ pub fn file_query(root: &Path, query: &str, limit: usize) -> anyhow::Result<Enve
                 kind: "config".to_owned(),
                 sig: String::new(),
                 snippet: String::new(),
+                snippet_truncated: false,
                 score: 1.0,
                 why: "path match".to_owned(),
             })
@@ -318,4 +354,35 @@ fn default_depth() -> usize {
 }
 fn default_intent() -> String {
     "explore".to_owned()
+}
+
+#[cfg(test)]
+mod search_response_tests {
+    use super::*;
+
+    #[test]
+    fn modern_search_sends_one_complete_copy_and_legacy_retains_text() {
+        let envelope = Envelope {
+            hits: vec![],
+            tokens: 0,
+            freshness_ms: 0,
+            coverage: "text_only".into(),
+            hint: Some("evidence payload ".repeat(1000)),
+        };
+        let expected = serde_json::to_value(&envelope).unwrap();
+        let modern = search_response(envelope.clone(), true).unwrap();
+        let legacy = search_response(envelope, false).unwrap();
+        assert_eq!(modern.structured_content.as_ref(), Some(&expected));
+        assert_eq!(legacy.structured_content.as_ref(), Some(&expected));
+        assert!(modern.content.is_empty());
+        let text = legacy.content[0].as_text().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text.text).unwrap(),
+            expected
+        );
+        assert!(
+            serde_json::to_vec(&modern).unwrap().len() * 100
+                < serde_json::to_vec(&legacy).unwrap().len() * 55
+        );
+    }
 }

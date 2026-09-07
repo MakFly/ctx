@@ -1,292 +1,213 @@
-# ctx — fast local codebase context for coding agents
+# ctx
 
-`ctx` is a Rust-native, local-first codebase search and exploration tool for
-Claude Code, Codex, OpenCode, Cursor, and other MCP-compatible coding agents.
-It indexes a repository into SQLite FTS5, extracts symbols and relationships
-with tree-sitter, and returns small, ranked, source-cited context packs.
+Local code search and bounded context for coding agents.
 
-No Python runtime, cloud API, account, API key, vector database, or embedding
-model is required for indexing and retrieval. `ctx run` is opt-in and uses the
-credentials of the selected external agent harness.
+`ctx` is a Rust CLI and MCP server that indexes a repository, finds source code,
+traces static relationships, and returns cited excerpts within a token budget.
+It combines full-text SQLite FTS5 search, a disk-backed trigram index, and
+Tree-sitter analysis in one native binary.
 
-## Why ctx?
+Indexing and retrieval run locally without an account, API key, embedding model,
+or cloud service. The optional `ctx run` command invokes an external coding-agent
+harness using that harness's credentials.
 
-Coding agents often repeat broad Grep, Glob, and Read operations. `ctx` turns
-that exploration into a reusable local index and returns token-bounded JSON with
-explicit coverage (`complete`, `partial`, or `text_only`). It also generates
-`.ctx/briefing.json` and `.ctx/briefing.md` for onboarding, changes, handoffs,
-and impact analysis.
+## Get started
 
-## Features
-
-- Single native Rust binary
-- Bundled SQLite with FTS5 and deterministic definition-first ranking
-- Tree-sitter symbols, imports, calls, references, callers, and callees
-- Token-bounded `search`, `graph`, and `pack` envelopes
-- Repository maps, entrypoint and route heuristics, hubs, and PageRank
-- Official Rust MCP SDK with four stdio tools: `ctx_search`, `ctx_graph`,
-  `ctx_pack`, and `ctx_file`
-- Skills and read-only explorer agents for Claude Code, Codex, OpenCode, and
-  Cursor
-- Harness detection, installation dry-runs, and idempotent updates
-- Optional, explicit LSP reference enrichment outside the search hot path
-
-## Supported languages and frameworks
-
-Structural indexing covers:
-
-- Python: `.py`, `.pyi`, `.pyw`; FastAPI, Flask, and Django heuristics
-- JavaScript and TypeScript: JS, JSX, TS, TSX, modules, Vue, Svelte, and Astro;
-  Express, NestJS, Next.js, Fastify, and Hono heuristics
-- Go: Gin, Echo, Fiber, and Chi heuristics
-- Rust: Axum, Actix Web, and Rocket heuristics
-- PHP: Laravel, Symfony, and Slim route heuristics
-
-Dynamic, generated, or metaprogrammed calls are resolved conservatively. CMS
-frameworks do not receive dedicated heuristics.
-
-## Requirements
-
-- Rust 1.88 or newer to install from source
-- Git, when Git-aware freshness information is wanted
-
-SQLite is bundled into the binary with FTS5 enabled.
-
-## Install
-
-From a clone:
+Install from source with Rust 1.88 or newer. SQLite is bundled.
 
 ```console
+git clone https://github.com/MakFly/ctx.git
+cd ctx
 cargo install --path .
-ctx --help
 ```
 
-## Quick start
+From the repository you want to explore:
 
 ```console
 ctx init
 ctx index .
-ctx search login --json
+ctx search 'solve_dependencies' --mode literal --json
+ctx search 'def (login|logout)' --mode regex --json
 ctx graph --op callers --symbol login --json
-ctx pack "where is authentication handled?" --json
-ctx explore --intent change --focus "authentication" --harness none
-ctx run "where is authentication handled?" --harness codex --model gpt-5.6-luna --json
+ctx pack 'where is authentication handled?' --json
 ```
 
-Indexes, maps, and briefings are written below `.ctx/`. `CTX_DIR` can
-redirect these artifacts for isolated indexes and tests.
+Artifacts live under `.ctx/`. Set `CTX_DIR` to use another index directory.
+Git is optional and enables Git-aware freshness information.
 
-## MCP and agent harness setup
+## Choose the right search
 
-Preview detected harnesses and every planned change:
+| Command or mode | Purpose |
+|---|---|
+| `search --mode auto` | Ranked retrieval; the default mode |
+| `search --mode text` | Ranked full-text search |
+| `search --mode symbol` | Ranked symbol search |
+| `search --mode literal` | Exact text in complete admitted files |
+| `search --mode regex` | Rust regex matches in complete admitted files |
+| `graph` | Definitions, references, callers, callees, paths and impact |
+| `pack` | A bounded evidence pack for exploration, edits or review |
+| `map` / `explore` | Repository maps and reusable onboarding briefings |
+
+Exact searches return merged matches with two lines of surrounding context.
+Use `--ignore-case` with literal or regex mode for Unicode case folding. Regexes
+support inline flags, including multiline and dot-all; lookarounds and
+backreferences are unsupported. Ranked queries are not interpreted as regexes.
+
+```console
+ctx search 'Vec<T>' --mode literal --budget-tokens 1500 --json
+ctx search '(?s)start.*finish' --mode regex --json
+ctx search 'HTTPException' --mode literal --ignore-case --json
+ctx explore --intent change --focus authentication --harness none
+```
+
+Results include source paths, line ranges, snippets, token estimates and coverage.
+Shortened excerpts carry `snippet_truncated: true`; missing or bounded evidence
+is reported as partial. Token estimates use serialized hit characters divided by
+four, rounded up per hit. They exclude envelope metadata and are not a provider's
+token count. A budget too small for hit metadata returns no hit.
+
+## Connect a coding agent
+
+Preview and install integrations for Claude Code, Codex, OpenCode and Cursor:
 
 ```console
 ctx install --dry-run
-```
-
-Install the MCP configuration, `ctx-explore` skill, and explorer agent for all
-supported harnesses:
-
-```console
 ctx install --target all
-```
-
-Refresh integrations already present in a project:
-
-```console
 ctx update --dry-run
 ctx update
 ```
 
-Individual targets are `claude`, `codex`, `opencode`, and `cursor`.
-Existing JSON and TOML configuration is merged, and repeated installation is
-idempotent.
+Individual targets are `claude`, `codex`, `opencode` and `cursor`. Installation
+merges existing JSON/TOML configuration and installs exploration skills and
+agents. Codex project trust remains a user-controlled setting.
 
-Codex loads a project-local `.codex/config.toml` only after the project has
-been marked trusted. This trust decision remains user-controlled; `ctx install`
-does not change global Codex trust settings.
+For a manual MCP configuration, use `ctx` as the command and `mcp` as its argument.
+The stdio server exposes `ctx_search`, `ctx_graph`, `ctx_pack` and `ctx_file`.
+`ctx mcp --compact` exposes only `ctx_pack`, as used by the generated Codex setup.
 
-Run the MCP server directly with:
+Full `ctx_search` sends structured evidence once to protocol 2025-06-18+ clients;
+older clients also receive the text fallback. Compact pack output is unchanged.
+
+## Live indexing and freshness
+
+`ctx mcp` watches the repository for its session lifetime. To watch directly:
 
 ```console
-ctx mcp
+ctx index . --watch
+ctx status --json
 ```
 
-`ctx mcp --compact` exposes only the one-argument `ctx_pack` fast path used by
-the generated Codex configuration. Other harnesses retain the full four-tool
-server.
+One OS-held lock permits one index writer. Other sessions observe publications
+and can take over when the owner exits. Manual indexing reports an active-writer
+error while a watcher owns the index. No permanent daemon is installed, and
+session shutdown stops and joins its worker.
 
-## Cached non-interactive runs
+Updates publish immutable trigram generations alongside SQLite transactions.
+Readers retain leases on generations in use. Unchanged reindexing preserves the
+current generation; changed files contribute incremental postings. MCP sessions
+reuse generation readers and a bounded 16-entry matcher cache.
 
-`ctx run` can execute Codex, Claude, OpenCode, or Cursor in non-interactive
-read-only mode. On a clean repository, a verified answer is cached in
-`.ctx/cache.sqlite`; the next identical request returns without launching the
-harness and reports zero new token usage.
+Exact search still traverses live files and checks versions before excluding
+non-candidates. New or changed files bypass pruning; missing or corrupt indexes
+fall back to scanning. Queries without safe trigram constraints scan directly.
+Budgeted searches avoid constructing further excerpts after the evidence budget
+closes while preserving omission and read-error reporting.
 
-Run `ctx install --target opencode` or `ctx install --target cursor` before
-using those adapters so their project MCP configuration is present. Codex and
-Claude receive an isolated compact MCP configuration directly from `ctx run`.
+The watcher coalesces events after 200 ms of quiet, with a two-second maximum
+burst window. Startup, queue overflow, ignore-rule changes and hourly
+reconciliation repair drift. Linux watches admitted directories and relevant Git
+metadata; other backends watch recursively and filter artifact events.
 
-Set a deterministic default and model in `.ctx/config.toml`:
+This is not an atomic filesystem snapshot. Pending structural updates and detected
+read races produce partial coverage. Changes preserving every observable file
+version attribute require `ctx index . --force` or forced watcher reconciliation.
+`ctx status --json` reports generation, watcher, pending-work and exclusion data.
+
+## Languages and file limits
+
+Tree-sitter analysis supports Python, JavaScript/TypeScript, Go, Rust and PHP,
+including supported frontend component formats and framework route heuristics.
+Dynamic calls, generated code and framework detection remain best-effort.
+Text files without a supported grammar can still provide search evidence.
 
 ```toml
-default_harness = "codex"
-
-[runners.codex]
-model = "gpt-5.6-luna"
-effort = "high"
-
-[cache]
-enabled = true
-max_size_mb = 256
-max_age_days = 30
+# .ctx/config.toml
+[index]
+max_file_mb = 64
+buffer_mb = 64
 ```
 
-Cache reuse is disabled whenever the working tree is dirty. Cache keys include
-the full Git SHA, normalized question, exact model and effort, runner-binary
-fingerprint, ctx prompt version, and evidence-pack digest.
+Text admission defaults to 64 MiB per file; structural analysis is limited to
+1 MiB. Hidden-file and ignore policies still apply. Coverage concerns admitted
+files, not ignored or oversized content. The buffer setting limits the trigram
+external-sort arena, not total process memory.
 
-JSON responses expose `cache_lookup_ms`, `harness_ms`, `validation_ms`, and
-token usage so cache effectiveness can be measured without parsing logs.
+## Optional capabilities
+
+`ctx run` invokes Codex, Claude, OpenCode or Cursor in non-interactive read-only
+mode. Exact verified answers can be reused on clean repositories without another
+harness call. Dirty working trees disable reuse. Cache keys include Git state,
+question, model, effort, harness fingerprint and evidence digest.
 
 ```console
-ctx run "where is login defined?" --harness auto --json
-ctx run "where is login defined?" --harness codex --model gpt-5.6-luna --cache refresh --json
+ctx run 'where is login defined?' --harness codex --json
 ctx cache status --json
 ctx cache prune --max-age-days 30 --max-size-mb 256 --json
-ctx cache clear --kind agent --json
 ```
 
-## Command reference
+OpenCode and Cursor adapters require their project integration to be installed.
+Harness compatibility depends on supported CLI options; unsupported versions
+fail rather than silently broadening tool access.
 
-```console
-ctx init
-ctx index [PATH]
-ctx status --json
-ctx search QUERY --mode auto|text|symbol --json
-ctx graph --op def|refs|callers|callees|path|impact --symbol SYMBOL --json
-ctx pack QUERY --intent explore|edit|review --json
-ctx map --json
-ctx explore --intent onboard|change|handoff|impact --harness none
-ctx mcp
-ctx run QUESTION --harness auto|codex|claude|opencode|cursor --model MODEL --json
-ctx cache status --json
-ctx cache prune --json
-ctx install --dry-run
-ctx install --target all
-ctx update --dry-run
-ctx update
-ctx embeddings status --json
-```
-
-## Optional LSP enrichment
-
-Tree-sitter and FTS5 remain the default offline path. LSP servers are optional
-and selected explicitly:
+LSP reference enrichment is explicit and outside the search hot path:
 
 ```console
 ctx lsp sources --json
-ctx lsp status --json
 ctx lsp fetch --dry-run
-ctx lsp fetch --language rust
 ctx lsp enrich . --language rust --background
 ```
 
-The registry supports BasedPyright, TypeScript Native Preview, `gopls`,
-rust-analyzer, and Phpactor. Official Laravel and Symfony language servers are
-not currently integrated.
+Language servers may execute project tools; use them only with trusted projects
+or appropriate isolation. Embedding configuration is reserved for future work:
+embeddings remain disabled, and no embedding model is downloaded or invoked.
 
-Treat LSP execution as trusted-project functionality: a language server may
-load project configuration, start external tools, or execute application code.
-The Rust client consumes reference locations only, rejects paths outside the
-repository, and explicitly refuses unsupported server-to-client requests. Do
-not run LSP enrichment on an untrusted repository without a sandbox.
+## Measurements and validation
 
-GitHub release downloads are checked against a published SHA-256 digest when
-available. This is an integrity check, not an independent publisher
-attestation.
+The latest engine validation passed **298 workspace/all-target tests**. A separate
+140-case comparison against the preceding release matched complete search JSON
+except elapsed time. These checks cover correctness, not universal speed gains.
 
-## Embeddings roadmap
+[Benchmark methodology and raw results](benchmarks/README.md) distinguish:
 
-The configuration reserves local and API embedding providers, but embeddings
-remain disabled and no model or network is used. `ctx embeddings status` shows
-the inert configuration. Setup and indexing intentionally fail with a readable
-message until the later opt-in hybrid retrieval release.
+- Historical synthetic retrieval and agent-workflow measurements.
+- Paired indexed/scan searches on pinned FastAPI source code.
+- Persistent MCP timings, output sizes, watcher visibility and shutdown checks.
+- The latest optimization batch measured with an existing debug/test binary.
+- A new ctx-versus-Zoekt CLI benchmark whose actual Zoekt run is still pending.
 
-## Development
+The latest batch reduced historical debug MCP medians by 9–37% in seven of eight
+FastAPI scenarios; the absent query regressed 2%. Runs were separate, budgets
+were unlimited, and these are **not release performance claims**. Earlier
+release measurements predate that batch. There is no verified Zoekt speed ratio.
 
-```console
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
-```
+Benchmark scripts use existing executables and never compile or install tools.
+Python 3 is needed only for the Python benchmark scripts, not for ctx itself.
+See also the [pinned multi-repository comparison suite](benchmarks/competitive/README.md).
 
-The Rust acceptance suite covers indexing, every supported grammar, search,
-graph traversal, context packing, maps, briefing generation, harness
-installation, CLI errors, and the MCP stdio handshake and tool calls.
+## Development and project status
 
-## Benchmark
-
-The benchmark generates a mixed Python/TypeScript/Go/Rust/PHP repository and
-measures cold indexing, unchanged reindexing, search, graph traversal, and
-context packing:
+`ctx` is an early project. Static relationships and framework heuristics are
+best-effort; full-text evidence does not imply complete structural understanding.
+See [PRD.md](PRD.md) for the product contract.
 
 ```console
-cargo run --release --example benchmark -- \
-  --files 1000 \
-  --iterations 100 \
-  --warmups 10 \
-  --output benchmarks/results/latest.json
+cargo fmt --all -- --check
+cargo test --workspace --all-targets --locked
 ```
 
-See [benchmarks/README.md](benchmarks/README.md) for the methodology. The
-command writes the complete environment and percentiles to the requested JSON
-path. Results are synthetic measurements, not guarantees for every repository.
-
-A separate [real-repository competitive benchmark](benchmarks/competitive/README.md)
-pins ten public repositories and four competing MCP tools. Its corpus and
-forty source facts are verified; cross-tool results will only be published once
-the isolated competitor runs are complete.
-
-Latest measured release run (2026-09-04, Ryzen 7 3700X, Linux x86_64,
-1,002 indexed files):
-
-| Operation | Result |
-|---|---:|
-| Cold index | 190.28 ms / 5,266 files/s |
-| Unchanged reindex | 36.25 ms |
-| Symbol search p50 / p95 | 1.64 / 1.72 ms |
-| Text search p50 / p95 | 1.19 / 1.25 ms |
-| Definition graph p50 / p95 | 0.53 / 0.56 ms |
-| Callers graph p50 / p95 | 0.60 / 0.71 ms |
-| Context pack p50 / p95 | 6.38 / 6.61 ms |
-
-Raw measurements and the full percentile table are available in
-[`benchmarks/results/latest.json`](benchmarks/results/latest.json).
-
-Agent-level A/B on the ten-file fixture, using Codex CLI 0.153.1 with
-`gpt-5.6-luna` at high reasoning effort (median of three runs):
-
-| Variant | Wall time | Input tokens | Output tokens | Tool calls | Accuracy |
-|---|---:|---:|---:|---:|---:|
-| Shell search baseline | 22.91 s | 61,192 | 568 | 3 | 4/4 |
-| Compact `ctx_pack` MCP | 17.90 s | 45,715 | 466 | 1 | 4/4 |
-| `ctx run`, clean cache miss | 15.58 s | 46,551 | 506 | 1 | 4/4 |
-| `ctx run`, exact cache hit | 0.01 s | 0 | 0 | 0 | 4/4 |
-
-On this controlled fixture, compact MCP was 21.9% faster than shell search and
-used 25.3% fewer total input tokens. Against the original pre-optimization MCP
-snapshot, it was 43.6% faster and used 61.7% fewer input tokens. An exact clean
-cache hit avoided the harness entirely and returned in 15 ms internally. The
-uncached-input difference between fresh MCP and shell runs was only 0.4%, so
-provider prompt caching explains part of the total-token gap.
-
-Native retrieval improved for indexing and most queries versus the prior
-same-host snapshot, but context-pack p50 regressed from 4.724 ms to 6.380 ms
-(+1.656 ms). See [the complete methodology, percentiles, raw runs, and honest
-before/after notes](benchmarks/README.md#codex-exec-ctx-mcp-versus-shell-baseline).
-
-## Project status
-
-`ctx` is an early MVP. Symbol resolution and framework detection remain
-best-effort for dynamic code. See [PRD.md](PRD.md) for the product contract.
+The trigram engine is adapted from Microsoft tgrep under its MIT license.
+[Vendored provenance](vendor/tgrep-core/PROVENANCE.md) records the pinned revision,
+local changes and validation history. Maintainers should read
+[the integration maintenance memory](docs/TGREP_MAINTENANCE.md) before changing
+search, indexing or watchers. Further ideas are tracked in
+[the optimization research](docs/SEARCH_OPTIMIZATION_RESEARCH.md).

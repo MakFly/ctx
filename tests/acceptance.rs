@@ -86,11 +86,13 @@ fn search_graph_and_pack_match_acceptance_contract() {
     )
     .unwrap();
     assert!(one_shot.tokens <= 800);
+    // Static graph relations remain best-effort even when all requested hits fit.
+    assert_eq!(one_shot.coverage, "partial");
     assert!(
         one_shot
             .hint
             .as_deref()
-            .is_some_and(|hint| hint.starts_with("answer-ready:"))
+            .is_some_and(|hint| !hint.starts_with("answer-ready:"))
     );
     for (path, symbol, why) in [
         ("auth.py", "login", "definition of login"),
@@ -140,6 +142,139 @@ fn pack_preserves_requested_definitions_before_long_bodies_and_relations() {
     assert!(pack.tokens <= 800);
     assert_eq!(pack.coverage, "partial");
     assert!(!pack.hint.unwrap().starts_with("answer-ready:"));
+}
+
+#[test]
+fn pack_keeps_qualified_homonyms_and_propagates_source_truncation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(root.join("methods.py"), "class A:\n    def run(self):\n        return 1\nclass B:\n    def run(self):\n        return 2\n").unwrap();
+    fs::write(
+        root.join("long.py"),
+        format!(
+            "def long_function():\n    \"\"\"{}\"\"\"\n    return 'ending'\n",
+            "description ".repeat(250)
+        ),
+    )
+    .unwrap();
+    index_repository(root).unwrap();
+    let pack = pack_query("A.run B.run", 2_000, "explore", root).unwrap();
+    for start in [2, 5] {
+        assert!(
+            pack.hits
+                .iter()
+                .any(|hit| hit.path == "methods.py" && hit.start == start && hit.kind == "def")
+        );
+    }
+    let pack = pack_query("long_function", 800, "explore", root).unwrap();
+    assert_eq!(pack.coverage, "partial");
+    assert!(pack.hits.iter().any(|hit| hit.snippet_truncated));
+    assert!(!pack.hint.unwrap().starts_with("answer-ready:"));
+}
+
+#[test]
+fn search_budget_counts_serialized_hits_even_for_tiny_budgets() {
+    let (_temporary, root) = fixture();
+    index_repository(&root).unwrap();
+    for budget in [0, 1, 50, 100, 200] {
+        let result = search_index("login", "auto", None, 20, budget, &root).unwrap();
+        let actual: usize = result
+            .hits
+            .iter()
+            .map(|hit| {
+                serde_json::to_string(hit)
+                    .unwrap()
+                    .chars()
+                    .count()
+                    .div_ceil(4)
+            })
+            .sum();
+        assert_eq!(result.tokens, actual);
+        assert!(actual <= budget);
+        if budget <= 1 {
+            assert!(result.hits.is_empty());
+        }
+    }
+}
+
+#[test]
+fn text_search_preserves_bm25_relevance() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(root.join("rank.py"), "def z_best():\n    # unicorn unicorn unicorn unicorn\n    pass\ndef a_weak():\n    # unicorn common words unrelated filler words here\n    pass\ndef filler():\n    # entirely different content\n    pass\n").unwrap();
+    let index = index_repository(root).unwrap();
+    let connection = connect(&index.database, false).unwrap();
+    let expected: String = connection.query_row("SELECT name FROM symbols_fts WHERE symbols_fts MATCH 'unicorn' ORDER BY bm25(symbols_fts,5.0,3.0,1.0) LIMIT 1", [], |row| row.get(0)).unwrap();
+    assert_eq!(expected, "z_best");
+    let result = search_index("unicorn", "text", None, 2, 2_000, root).unwrap();
+    assert_eq!(result.hits[0].symbol.as_deref(), Some(expected.as_str()));
+}
+
+#[test]
+fn index_removes_binary_transitions_and_force_checks_equal_metadata() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let file = root.join("sample.py");
+    fs::write(&file, "def alpha():\n    return 1\n").unwrap();
+    index_repository(root).unwrap();
+    let time = fs::metadata(&file).unwrap().modified().unwrap();
+    fs::write(&file, "def bravo():\n    return 1\n").unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(time))
+        .unwrap();
+    ctx_code::indexer::index_repository_with_options(root, true).unwrap();
+    assert!(
+        graph_query("def", "alpha", 1, 800, root)
+            .unwrap()
+            .hits
+            .is_empty()
+    );
+    assert!(
+        !graph_query("def", "bravo", 1, 800, root)
+            .unwrap()
+            .hits
+            .is_empty()
+    );
+    fs::write(&file, b"\0binary").unwrap();
+    let result = index_repository(root).unwrap();
+    assert_eq!((result.files, result.symbols), (0, 0));
+}
+
+#[test]
+fn map_ignores_edges_to_deleted_files() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(
+        root.join("a.py"),
+        "from b import target\ndef source():\n    target()\n",
+    )
+    .unwrap();
+    fs::write(root.join("b.py"), "def target():\n    return 1\n").unwrap();
+    index_repository(root).unwrap();
+    fs::remove_file(root.join("b.py")).unwrap();
+    let map = build_map(root).unwrap();
+    assert!(map.hubs.iter().all(|hub| hub.path != "b.py"));
+}
+
+#[test]
+fn index_migrates_legacy_edges_before_creating_dependent_indexes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::create_dir(root.join(".ctx")).unwrap();
+    let connection = rusqlite::Connection::open(root.join(".ctx/index.sqlite")).unwrap();
+    connection.execute_batch("CREATE TABLE edges(id INTEGER PRIMARY KEY,src_symbol_id INTEGER,dst_name TEXT NOT NULL,dst_symbol_id INTEGER,kind TEXT,file_id INTEGER,line INTEGER);").unwrap();
+    drop(connection);
+    fs::write(root.join("a.py"), "def alpha():\n    pass\n").unwrap();
+    let result = index_repository(root).unwrap();
+    assert_eq!(result.symbols, 1);
+    let connection = connect(&result.database, false).unwrap();
+    assert_eq!(
+        ctx_code::db::get_meta(&connection, "schema_version", "").unwrap(),
+        "4"
+    );
 }
 
 #[test]

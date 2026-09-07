@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::config::ctx_dir;
+use crate::config::{ctx_dir, load_config};
 use crate::model::Hit;
 
 const CACHE_SCHEMA: &str = r#"
@@ -65,6 +65,7 @@ pub struct AgentResult {
 #[derive(Debug, Clone)]
 pub struct CacheStore {
     path: PathBuf,
+    max_age_days: u64,
 }
 
 impl CacheStore {
@@ -73,13 +74,23 @@ impl CacheStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let store = Self { path };
+        let store = Self {
+            path,
+            max_age_days: load_config(root)?.cache.max_age_days,
+        };
         store.connection()?;
         Ok(store)
     }
 
     pub fn lookup(&self, key: &str) -> Result<Option<AgentResult>> {
         let connection = self.connection()?;
+        let cutoff = now_seconds().saturating_sub(
+            i64::try_from(self.max_age_days.saturating_mul(86_400)).unwrap_or(i64::MAX),
+        );
+        connection.execute(
+            "DELETE FROM agent_cache WHERE cache_key=?1 AND created_at<?2",
+            params![key, cutoff],
+        )?;
         let result = connection
             .query_row(
                 "SELECT result_json FROM agent_cache WHERE cache_key=?1",
@@ -280,6 +291,25 @@ mod tests {
             coverage: "complete".to_owned(),
             hint: None,
         }
+    }
+
+    #[test]
+    fn lookup_rejects_expired_entries_without_a_prune() {
+        let temporary = tempfile::tempdir().unwrap();
+        let store = CacheStore::open(temporary.path()).unwrap();
+        store
+            .store_and_release("key", "one", &json!({}), &result())
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE agent_cache SET created_at=?1",
+                [now_seconds() - 40 * 86_400],
+            )
+            .unwrap();
+        assert!(store.lookup("key").unwrap().is_none());
+        assert_eq!(store.status().unwrap()["entries"], 0);
     }
 
     #[test]

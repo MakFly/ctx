@@ -23,8 +23,22 @@ pub fn graph_query(
     budget_tokens: usize,
     start: impl AsRef<Path>,
 ) -> Result<Envelope> {
+    let start = start.as_ref();
+    let generation = crate::watcher::generation(start);
+    let result = graph_query_inner(operation, symbol, depth, budget_tokens, start)?;
+    Ok(crate::watcher::check_coverage(start, generation, result))
+}
+
+fn graph_query_inner(
+    operation: &str,
+    symbol: &str,
+    depth: usize,
+    budget_tokens: usize,
+    start: impl AsRef<Path>,
+) -> Result<Envelope> {
     let started = Instant::now();
     let connection = connect(&find_ctx(start)?.join("index.sqlite"), false)?;
+    connection.execute_batch("BEGIN DEFERRED")?;
     let definitions = definitions(&connection, symbol)?;
     let mut coverage = "complete";
     let mut hint = None;
@@ -68,7 +82,7 @@ pub fn graph_query(
 fn definitions(connection: &Connection, symbol: &str) -> Result<Vec<Definition>> {
     let mut statement = connection.prepare(
         "SELECT s.id,f.path,s.start,s.end,s.name,COALESCE(s.sig,''),
-                COALESCE(s.snippet,''),f.is_test
+                COALESCE(s.snippet,''),f.is_test,s.snippet_truncated
          FROM symbols s JOIN files f ON f.id=s.file_id
          WHERE s.name=?1 OR s.qualname=?1
          ORDER BY f.is_test,f.is_vendor,f.path,s.start",
@@ -89,6 +103,7 @@ fn definitions(connection: &Connection, symbol: &str) -> Result<Vec<Definition>>
                 .to_owned(),
                 sig: row.get(5)?,
                 snippet: row.get(6)?,
+                snippet_truncated: row.get(8)?,
                 score: 1.0,
                 why: "definition".to_owned(),
             },
@@ -107,7 +122,7 @@ fn references(
         (
             "SELECT e.line,e.kind,e.source,e.confidence,f.path,f.is_test,
                     COALESCE(s.name,e.dst_name),COALESCE(s.start,e.line),
-                    COALESCE(s.end,e.line),COALESCE(s.sig,''),COALESCE(s.snippet,'')
+                    COALESCE(s.end,e.line),COALESCE(s.sig,''),COALESCE(s.snippet,''),COALESCE(s.snippet_truncated,0)
              FROM edges e JOIN files f ON f.id=e.file_id
              LEFT JOIN symbols s ON s.id=e.src_symbol_id
              WHERE e.dst_name=?1
@@ -124,7 +139,7 @@ fn references(
         let sql = format!(
             "SELECT e.line,e.kind,e.source,e.confidence,f.path,f.is_test,
                     COALESCE(s.name,e.dst_name),COALESCE(s.start,e.line),
-                    COALESCE(s.end,e.line),COALESCE(s.sig,''),COALESCE(s.snippet,'')
+                    COALESCE(s.end,e.line),COALESCE(s.sig,''),COALESCE(s.snippet,''),COALESCE(s.snippet_truncated,0)
              FROM edges e JOIN files f ON f.id=e.file_id
              LEFT JOIN symbols s ON s.id=e.src_symbol_id
              WHERE e.dst_symbol_id IN ({placeholders}) OR e.dst_name=?{symbol_parameter}
@@ -150,6 +165,7 @@ fn references(
             kind: if edge_kind == "call" { "call" } else { "ref" }.to_owned(),
             sig: row.get(9)?,
             snippet: row.get(10)?,
+            snippet_truncated: row.get(11)?,
             score: if source == "lsp" { row.get(3)? } else { 0.9 },
             why: format!("{source} {edge_kind} of {symbol}"),
         })
@@ -167,7 +183,7 @@ fn callees(connection: &Connection, definitions: &[Definition]) -> Result<Vec<Hi
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT d.name,d.start,d.end,COALESCE(d.sig,''),COALESCE(d.snippet,''),f.path
+        "SELECT d.name,d.start,d.end,COALESCE(d.sig,''),COALESCE(d.snippet,''),f.path,d.snippet_truncated
          FROM edges e JOIN symbols d ON d.id=e.dst_symbol_id
          JOIN files f ON f.id=d.file_id
          WHERE e.src_symbol_id IN ({placeholders})
@@ -183,6 +199,7 @@ fn callees(connection: &Connection, definitions: &[Definition]) -> Result<Vec<Hi
             kind: "call".to_owned(),
             sig: row.get(3)?,
             snippet: row.get(4)?,
+            snippet_truncated: row.get(6)?,
             score: 0.9,
             why: "callee".to_owned(),
         })

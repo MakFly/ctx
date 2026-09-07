@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 
-pub const SCHEMA_VERSION: &str = "2";
+pub const SCHEMA_VERSION: &str = "4";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS files(
 CREATE TABLE IF NOT EXISTS symbols(
   id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   name TEXT NOT NULL, qualname TEXT, kind TEXT, start INTEGER, end INTEGER,
-  sig TEXT, snippet TEXT
+  sig TEXT, snippet TEXT, snippet_truncated INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS edges(
   id INTEGER PRIMARY KEY, src_symbol_id INTEGER, dst_name TEXT NOT NULL,
@@ -33,6 +33,27 @@ CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(path, excerpt);
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(name, qualname, snippet);
 "#;
 
+const TEXT_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS file_contents(
+  file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  version TEXT NOT NULL DEFAULT ''
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
+  content, content='file_contents', content_rowid='file_id'
+);
+CREATE TRIGGER IF NOT EXISTS contents_insert AFTER INSERT ON file_contents BEGIN
+  INSERT INTO content_fts(rowid,content) VALUES(new.file_id,new.content);
+END;
+CREATE TRIGGER IF NOT EXISTS contents_delete AFTER DELETE ON file_contents BEGIN
+  INSERT INTO content_fts(content_fts,rowid,content) VALUES('delete',old.file_id,old.content);
+END;
+CREATE TRIGGER IF NOT EXISTS contents_update AFTER UPDATE OF content ON file_contents BEGIN
+  INSERT INTO content_fts(content_fts,rowid,content) VALUES('delete',old.file_id,old.content);
+  INSERT INTO content_fts(rowid,content) VALUES(new.file_id,new.content);
+END;
+"#;
+
 pub fn connect(path: &Path, create: bool) -> Result<Connection> {
     if !create && !path.is_file() {
         bail!(
@@ -43,29 +64,67 @@ pub fn connect(path: &Path, create: bool) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let connection = Connection::open(path)
-        .with_context(|| format!("impossible d'ouvrir {}", path.display()))?;
+    let connection = (if create {
+        Connection::open(path)
+    } else {
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).or_else(
+            |_| Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY),
+        )
+    })
+    .with_context(|| format!("impossible d'ouvrir {}", path.display()))?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    let current: Option<String> = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    if !create && current.as_deref() == Some(SCHEMA_VERSION) {
+        connection.execute_batch("PRAGMA foreign_keys=ON")?;
+        return Ok(connection);
+    }
     connection.execute_batch(
         "PRAGMA foreign_keys=ON;
          PRAGMA journal_mode=WAL;
          PRAGMA synchronous=NORMAL;
          PRAGMA temp_store=MEMORY;",
     )?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    let transaction = connection.unchecked_transaction()?;
+    migrate(&transaction)?;
     if create {
-        connection.execute_batch(SCHEMA).map_err(|error| {
-            if error.to_string().to_ascii_lowercase().contains("fts5") {
+        transaction.execute_batch(SCHEMA).map_err(|error| {
+            if error
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("no such module: fts5")
+            {
                 anyhow::anyhow!("SQLite compilé sans FTS5")
             } else {
                 error.into()
             }
         })?;
-        set_meta(&connection, "schema_version", SCHEMA_VERSION)?;
+        set_meta(&transaction, "schema_version", SCHEMA_VERSION)?;
     }
-    migrate(&connection)?;
+    transaction.execute_batch(TEXT_SCHEMA)?;
+    set_meta(&transaction, "schema_version", SCHEMA_VERSION)?;
+    transaction.commit()?;
     Ok(connection)
 }
 
 fn migrate(connection: &Connection) -> Result<()> {
+    let mut symbols = connection.prepare("PRAGMA table_info(symbols)")?;
+    let columns = symbols
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.is_empty() && !columns.iter().any(|name| name == "snippet_truncated") {
+        // Old indexes did not record truncation: be conservative until reindexed.
+        connection.execute(
+            "ALTER TABLE symbols ADD COLUMN snippet_truncated INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
     let exists: Option<i64> = connection
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='edges'",

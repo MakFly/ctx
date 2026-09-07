@@ -5,6 +5,19 @@ use ctx_code::harness::{install, installation_plan};
 use serde_json::Value;
 
 #[test]
+fn install_preserves_unreadable_text_configurations() {
+    for relative in ["AGENTS.md", ".codex/config.toml"] {
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = b"existing settings\xff";
+        fs::write(&path, original).unwrap();
+        assert!(install(project.path(), "codex", "install").is_err());
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+}
+
+#[test]
 fn dry_run_detects_path_without_writing() {
     let project = tempfile::tempdir().unwrap();
     let binaries = tempfile::tempdir().unwrap();

@@ -26,6 +26,7 @@ fn is_ctx_artifact(status_line: &str) -> bool {
 
 fn git_output(root: &Path, arguments: &[&str]) -> Option<String> {
     let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .args(arguments)
         .current_dir(root)
         .output()
