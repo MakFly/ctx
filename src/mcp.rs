@@ -146,7 +146,7 @@ impl CtxMcp {
 
     #[tool(
         name = "ctx_pack",
-        description = "One-shot code answer pack. Exact symbols include definitions, callers, and callees. Call once and answer immediately when requested facts are present; use another tool only for a missing fact.",
+        description = "Bounded code evidence pack: definitions, callers, callees, citation spans. Answer when requested facts are in the hits; otherwise run the hint (another ctx_pack). Do not Grep while coverage is not text_only.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -208,7 +208,9 @@ fn search_response(envelope: Envelope, structured_only: bool) -> Result<CallTool
 impl ServerHandler for CtxMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Use ctx_pack before broad Grep. Cite returned path:line spans.")
+            .with_instructions(
+                "Use ctx_pack before broad Grep. Answer when requested facts are in the hits; otherwise run the hint. Cite path:line spans. Do not Grep while coverage is not text_only.",
+            )
     }
 }
 
@@ -231,7 +233,7 @@ impl CompactCtxMcp {
 impl CompactCtxMcp {
     #[tool(
         name = "ctx_pack",
-        description = "One-shot code evidence: definitions, callers, callees, exact citation spans. Call once, then answer.",
+        description = "Bounded code evidence: definitions, callers, callees, citation spans. Answer when requested facts are in the hits; otherwise run the hint as another ctx_pack. Do not Grep while coverage is not text_only.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -254,7 +256,9 @@ impl CompactCtxMcp {
 impl ServerHandler for CompactCtxMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Call ctx_pack once and cite its exact spans.")
+            .with_instructions(
+                "Call ctx_pack. Answer if requested facts are in the hits; otherwise run the hint. Cite exact path:line spans. Do not Grep while coverage is not text_only.",
+            )
     }
 }
 
@@ -359,6 +363,7 @@ fn default_intent() -> String {
 #[cfg(test)]
 mod search_response_tests {
     use super::*;
+    use rmcp::ServerHandler;
 
     #[test]
     fn modern_search_sends_one_complete_copy_and_legacy_retains_text() {
@@ -384,5 +389,16 @@ mod search_response_tests {
             serde_json::to_vec(&modern).unwrap().len() * 100
                 < serde_json::to_vec(&legacy).unwrap().len() * 55
         );
+    }
+
+    #[test]
+    fn compact_instructions_send_the_agent_to_the_hint() {
+        let info = CompactCtxMcp::new(PathBuf::from(".")).get_info();
+        let instructions = info.instructions.unwrap_or_default();
+        let lower = instructions.to_ascii_lowercase();
+        assert!(!lower.contains("call once, then answer"), "{instructions}");
+        assert!(!lower.contains("then answer"), "{instructions}");
+        assert!(lower.contains("hint"), "{instructions}");
+        assert!(lower.contains("hits"), "{instructions}");
     }
 }

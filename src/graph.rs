@@ -42,32 +42,23 @@ fn graph_query_inner(
     let definitions = definitions(&connection, symbol)?;
     let mut coverage = "complete";
     let mut hint = None;
+    if definitions.is_empty() || definitions.len() > 1 {
+        coverage = "partial";
+        hint = Some(resolution_hint(&definitions));
+    }
     let mut hits = match operation {
         "def" => definitions.iter().map(|item| item.hit.clone()).collect(),
         "refs" | "callers" => {
-            if definitions.is_empty() || definitions.len() > 1 {
-                coverage = "partial";
-                hint = Some("résolution statique best-effort".to_owned());
-            }
-            references(&connection, symbol, &definitions)?
-        }
-        "callees" => {
-            coverage = "partial";
-            hint = Some("résolution statique best-effort".to_owned());
-            callees(&connection, &definitions)?
-        }
-        "path" | "impact" => {
-            coverage = "partial";
-            hint = Some(format!(
-                "résolution statique best-effort; profondeur demandée {depth}"
-            ));
-            let mut values = definitions
-                .iter()
-                .map(|item| item.hit.clone())
-                .collect::<Vec<_>>();
+            let mut values = homonym_definition_hits(&definitions);
             values.extend(references(&connection, symbol, &definitions)?);
             values
         }
+        "callees" => {
+            let mut values = homonym_definition_hits(&definitions);
+            values.extend(callees(&connection, &definitions)?);
+            values
+        }
+        "path" | "impact" => walk_resolved_calls(&connection, &definitions, depth, operation)?,
         _ => bail!("opération graph inconnue: {operation}"),
     };
     if operation == "def" && definitions.len() > 1 {
@@ -77,6 +68,31 @@ fn graph_query_inner(
     let mut seen = HashSet::new();
     hits.retain(|hit| seen.insert((hit.path.clone(), hit.start, hit.kind.clone())));
     Ok(apply_budget(hits, budget_tokens, started, coverage, hint))
+}
+
+fn homonym_definition_hits(definitions: &[Definition]) -> Vec<Hit> {
+    if definitions.len() > 1 {
+        definitions.iter().map(|item| item.hit.clone()).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+fn resolution_hint(definitions: &[Definition]) -> String {
+    if definitions.len() > 1 {
+        let mut paths = definitions
+            .iter()
+            .map(|item| item.hit.path.as_str())
+            .collect::<Vec<_>>();
+        paths.sort_unstable();
+        paths.dedup();
+        format!(
+            "résolution statique best-effort; plusieurs définitions correspondent: {}",
+            paths.join(", ")
+        )
+    } else {
+        "résolution statique best-effort".to_owned()
+    }
 }
 
 fn definitions(connection: &Connection, symbol: &str) -> Result<Vec<Definition>> {
@@ -169,6 +185,76 @@ fn references(
             score: if source == "lsp" { row.get(3)? } else { 0.9 },
             why: format!("{source} {edge_kind} of {symbol}"),
         })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn walk_resolved_calls(
+    connection: &Connection,
+    definitions: &[Definition],
+    depth: usize,
+    operation: &str,
+) -> Result<Vec<Hit>> {
+    let mut hits = definitions
+        .iter()
+        .map(|item| item.hit.clone())
+        .collect::<Vec<_>>();
+    let mut visited = definitions
+        .iter()
+        .map(|item| item.id)
+        .collect::<HashSet<_>>();
+    let mut frontier = visited.iter().copied().collect::<Vec<_>>();
+    for hop in 1..=depth {
+        if frontier.is_empty() {
+            break;
+        }
+        let destinations = resolved_call_destinations(connection, &frontier)?;
+        frontier.clear();
+        for (id, mut hit) in destinations {
+            if !visited.insert(id) {
+                continue;
+            }
+            hit.why = format!("{operation} hop {hop} via call");
+            hits.push(hit);
+            frontier.push(id);
+        }
+    }
+    Ok(hits)
+}
+
+fn resolved_call_destinations(connection: &Connection, src_ids: &[i64]) -> Result<Vec<(i64, Hit)>> {
+    if src_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=src_ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT d.id,d.name,d.start,d.end,COALESCE(d.sig,''),COALESCE(d.snippet,''),f.path,d.snippet_truncated
+         FROM edges e JOIN symbols d ON d.id=e.dst_symbol_id
+         JOIN files f ON f.id=d.file_id
+         WHERE e.src_symbol_id IN ({placeholders})
+           AND e.kind='call'
+         ORDER BY f.path,d.start"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(src_ids), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            Hit {
+                path: row.get(6)?,
+                start: row.get::<_, i64>(2)?.max(1) as usize,
+                end: row.get::<_, i64>(3)?.max(1) as usize,
+                symbol: Some(row.get(1)?),
+                kind: "call".to_owned(),
+                sig: row.get(4)?,
+                snippet: row.get(5)?,
+                snippet_truncated: row.get(7)?,
+                score: 0.9,
+                why: "call".to_owned(),
+            },
+        ))
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }

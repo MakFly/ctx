@@ -117,6 +117,10 @@ admitted directories plus relevant Git metadata. Other backends watch the root
 recursively and filter excluded artifact events. Do not claim ignored trees
 are unsubscribed on every platform. Pending updates, stale evidence or a
 generation change during retrieval must not silently yield a consistent graph.
+Ranked `search_index`, `graph_query` and `pack_query` refuse `coverage=complete`
+when live admitted files or their `file_version` stamps drift from
+`file_contents.version`, including paths that never appear in envelope hits.
+Exact literal/regex search still walks live files.
 
 ## How to approach an update
 

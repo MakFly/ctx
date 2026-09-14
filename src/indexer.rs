@@ -472,22 +472,21 @@ fn upsert_file(connection: &rusqlite::Connection, item: &PreparedFile) -> Result
 }
 
 fn resolve_edges(connection: &rusqlite::Connection) -> Result<()> {
+    // Parser edges resolve only when dst_name is unique in the same file, or
+    // unique in the whole index. Homonyms stay unmatched (dst_symbol_id NULL).
     connection.execute_batch(
         "UPDATE edges SET dst_symbol_id=NULL WHERE source='parser';
          UPDATE edges SET dst_symbol_id=COALESCE(
            (SELECT s.id FROM symbols s
             WHERE s.name=edges.dst_name AND s.file_id=edges.file_id
-            ORDER BY s.start LIMIT 1),
-           (SELECT s.id FROM symbols s JOIN files f ON f.id=s.file_id
+              AND (SELECT COUNT(*) FROM symbols same
+                   WHERE same.name=edges.dst_name AND same.file_id=edges.file_id)=1),
+           (SELECT s.id FROM symbols s
             WHERE s.name=edges.dst_name
-              AND f.lang=(SELECT src.lang FROM files src WHERE src.id=edges.file_id)
-            ORDER BY f.is_test,f.is_vendor,f.path,s.start LIMIT 1),
-           (SELECT s.id FROM symbols s JOIN files f ON f.id=s.file_id
-            WHERE s.name=edges.dst_name
-            ORDER BY f.is_test,f.is_vendor,f.path,s.start LIMIT 1)
+              AND (SELECT COUNT(*) FROM symbols all_names
+                   WHERE all_names.name=edges.dst_name)=1)
          )
-         WHERE source='parser'
-           AND EXISTS(SELECT 1 FROM symbols s WHERE s.name=edges.dst_name);",
+         WHERE source='parser';",
     )?;
     Ok(())
 }

@@ -92,8 +92,23 @@ fn search_graph_and_pack_match_acceptance_contract() {
         one_shot
             .hint
             .as_deref()
-            .is_some_and(|hint| !hint.starts_with("answer-ready:"))
+            .is_some_and(|hint| !hint.starts_with("answer-ready:") && hint.contains("expand "))
     );
+    for hit in &one_shot.hits {
+        if hit.kind == "def" {
+            assert!(
+                hit.snippet.is_empty() || hit.snippet.chars().count() <= hit.sig.chars().count(),
+                "{} snippet longer than signature",
+                hit.symbol.as_deref().unwrap_or("?")
+            );
+        } else {
+            assert!(
+                hit.snippet.is_empty(),
+                "explore extra hit should be digest: {}",
+                hit.why
+            );
+        }
+    }
     for (path, symbol, why) in [
         ("auth.py", "login", "definition of login"),
         ("app.py", "login_route", "caller of login"),
@@ -141,7 +156,84 @@ fn pack_preserves_requested_definitions_before_long_bodies_and_relations() {
     }
     assert!(pack.tokens <= 800);
     assert_eq!(pack.coverage, "partial");
-    assert!(!pack.hint.unwrap().starts_with("answer-ready:"));
+    let hint = pack.hint.unwrap();
+    assert!(!hint.starts_with("answer-ready:"));
+    assert!(hint.contains("expand "));
+    for hit in &pack.hits {
+        if hit.kind != "def" && hit.kind != "test" {
+            assert!(hit.snippet.is_empty(), "digest extra hit {}", hit.why);
+        }
+    }
+}
+
+#[test]
+fn pack_explore_is_signature_only_while_edit_keeps_bodies() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(
+        root.join("long.py"),
+        format!(
+            "def long_function():\n    \"\"\"{}\"\"\"\n    return 'ending'\n",
+            "description ".repeat(80)
+        ),
+    )
+    .unwrap();
+    index_repository(root).unwrap();
+    let explore = pack_query("long_function", 800, "explore", root).unwrap();
+    let explored = explore
+        .hits
+        .iter()
+        .find(|hit| hit.symbol.as_deref() == Some("long_function") && hit.kind == "def")
+        .expect("explore definition");
+    assert!(!explored.sig.is_empty());
+    assert!(
+        explored.snippet.is_empty()
+            || explored.snippet.chars().count() <= explored.sig.chars().count()
+    );
+    assert!(explored.snippet_truncated);
+
+    let edit = pack_query("long_function", 2_000, "edit", root).unwrap();
+    let edited = edit
+        .hits
+        .iter()
+        .find(|hit| hit.symbol.as_deref() == Some("long_function") && hit.kind == "def")
+        .expect("edit definition");
+    assert!(!edited.sig.is_empty());
+    assert!(edited.snippet.chars().count() > edited.sig.chars().count());
+    assert!(edited.snippet.contains("ending"));
+}
+
+#[test]
+fn pack_expand_round_trip_restores_omitted_body() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(
+        root.join("long.py"),
+        format!(
+            "def long_function():\n    \"\"\"{}\"\"\"\n    return 'ending'\n",
+            "description ".repeat(80)
+        ),
+    )
+    .unwrap();
+    index_repository(root).unwrap();
+    let first = pack_query("long_function", 800, "explore", root).unwrap();
+    let truncated = first
+        .hits
+        .iter()
+        .find(|hit| hit.symbol.as_deref() == Some("long_function"))
+        .expect("truncated definition");
+    assert!(truncated.snippet_truncated);
+    let hint = first.hint.expect("expand hint");
+    assert!(hint.contains("expand "));
+    let expanded = pack_query(&hint, 800, "explore", root).unwrap();
+    let restored = expanded
+        .hits
+        .iter()
+        .find(|hit| hit.path == truncated.path && hit.start == truncated.start)
+        .expect("expanded span");
+    assert!(!restored.snippet_truncated);
+    assert!(restored.snippet.contains("ending"));
+    assert!(restored.snippet.chars().count() > truncated.sig.chars().count());
 }
 
 #[test]
@@ -169,7 +261,9 @@ fn pack_keeps_qualified_homonyms_and_propagates_source_truncation() {
     let pack = pack_query("long_function", 800, "explore", root).unwrap();
     assert_eq!(pack.coverage, "partial");
     assert!(pack.hits.iter().any(|hit| hit.snippet_truncated));
-    assert!(!pack.hint.unwrap().starts_with("answer-ready:"));
+    let hint = pack.hint.unwrap();
+    assert!(!hint.starts_with("answer-ready:"));
+    assert!(hint.contains("expand "));
 }
 
 #[test]
@@ -360,5 +454,207 @@ fn pack_is_bounded_and_fast_after_indexing() {
         elapsed.as_millis() < 500,
         "pack took {}ms",
         elapsed.as_millis()
+    );
+}
+
+fn has_symbol(envelope: &ctx_code::model::Envelope, name: &str) -> bool {
+    envelope
+        .hits
+        .iter()
+        .any(|hit| hit.symbol.as_deref() == Some(name))
+}
+
+fn assert_hits_have_path_and_spans(envelope: &ctx_code::model::Envelope) {
+    assert!(
+        !envelope.hits.is_empty(),
+        "expected graph hits with path and line spans"
+    );
+    for hit in &envelope.hits {
+        assert!(
+            !hit.path.is_empty(),
+            "hit missing path for symbol {:?}",
+            hit.symbol
+        );
+        assert!(
+            hit.start >= 1,
+            "{}:{}-{} missing a 1-based start span",
+            hit.path,
+            hit.start,
+            hit.end
+        );
+        assert!(
+            hit.end >= hit.start,
+            "{}:{}-{} has an inverted span",
+            hit.path,
+            hit.start,
+            hit.end
+        );
+    }
+}
+
+fn distinguishes_paths(envelope: &ctx_code::model::Envelope, left: &str, right: &str) -> bool {
+    let hint = envelope.hint.as_deref().unwrap_or("");
+    let mentions =
+        |path: &str| envelope.hits.iter().any(|hit| hit.path == path) || hint.contains(path);
+    mentions(left) && mentions(right)
+}
+
+#[test]
+fn python_call_chain_path_and_impact_honor_depth() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(
+        root.join("a.py"),
+        "from b import chain_b\n\ndef chain_a():\n    return chain_b()\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("b.py"),
+        "from c import chain_c\n\ndef chain_b():\n    return chain_c()\n",
+    )
+    .unwrap();
+    fs::write(root.join("c.py"), "def chain_c():\n    return 1\n").unwrap();
+    index_repository(root).unwrap();
+
+    for operation in ["path", "impact"] {
+        let depth_one = graph_query(operation, "chain_a", 1, 4_000, root).unwrap();
+        assert_hits_have_path_and_spans(&depth_one);
+        assert!(
+            !has_symbol(&depth_one, "chain_c"),
+            "{operation} depth 1 must not include chain_c: {:?}",
+            depth_one
+                .hits
+                .iter()
+                .map(|hit| (hit.path.as_str(), hit.symbol.as_deref(), hit.start, hit.end))
+                .collect::<Vec<_>>()
+        );
+
+        let depth_two = graph_query(operation, "chain_a", 2, 4_000, root).unwrap();
+        assert_hits_have_path_and_spans(&depth_two);
+        let reached = depth_two
+            .hits
+            .iter()
+            .find(|hit| hit.symbol.as_deref() == Some("chain_c"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{operation} depth 2 must include chain_c: {:?}",
+                    depth_two
+                        .hits
+                        .iter()
+                        .map(|hit| (hit.path.as_str(), hit.symbol.as_deref(), hit.start, hit.end))
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(reached.path, "c.py");
+        assert!(reached.start >= 1);
+        assert!(reached.end >= reached.start);
+    }
+}
+
+fn write_unique_and_homonym_python(root: &Path) {
+    fs::write(
+        root.join("unique_src.py"),
+        "from unique_dst import unique_dst\n\ndef unique_src():\n    return unique_dst()\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("unique_dst.py"),
+        "def unique_dst():\n    return 1\n",
+    )
+    .unwrap();
+    fs::write(root.join("util.py"), "def leaf():\n    return 1\n").unwrap();
+    fs::write(
+        root.join("left.py"),
+        "from util import leaf\n\ndef shared():\n    return leaf()\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("right.py"),
+        "from util import leaf\n\ndef shared():\n    return leaf()\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("caller.py"),
+        "from left import shared\n\ndef user():\n    return shared()\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn unique_def_callees_are_complete_and_include_callee() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    write_unique_and_homonym_python(root);
+    index_repository(root).unwrap();
+
+    let unique = graph_query("callees", "unique_src", 1, 4_000, root).unwrap();
+    assert_eq!(unique.coverage, "complete");
+    assert!(
+        has_symbol(&unique, "unique_dst"),
+        "unique-def callees must include unique_dst: {:?}",
+        unique
+            .hits
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.symbol.as_deref()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn homonym_callees_and_callers_are_partial_and_not_collapsed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    write_unique_and_homonym_python(root);
+    index_repository(root).unwrap();
+
+    let callees = graph_query("callees", "shared", 1, 4_000, root).unwrap();
+    let callers = graph_query("callers", "shared", 1, 4_000, root).unwrap();
+    assert_eq!(callees.coverage, "partial");
+    assert_eq!(callers.coverage, "partial");
+    assert!(
+        distinguishes_paths(&callees, "left.py", "right.py"),
+        "homonym callees collapsed to one path: hits={:?} hint={:?}",
+        callees
+            .hits
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.symbol.as_deref()))
+            .collect::<Vec<_>>(),
+        callees.hint
+    );
+    assert!(
+        distinguishes_paths(&callers, "left.py", "right.py"),
+        "homonym callers collapsed to one path: hits={:?} hint={:?}",
+        callers
+            .hits
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.symbol.as_deref()))
+            .collect::<Vec<_>>(),
+        callers.hint
+    );
+}
+
+#[test]
+fn new_admitted_python_file_without_reindex_is_not_complete_coverage() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(root.join("keep.py"), "def fresh_widget():\n    return 1\n").unwrap();
+    index_repository(root).unwrap();
+
+    fs::write(root.join("extra.py"), "def fresh_widget():\n    return 2\n").unwrap();
+
+    let search = search_index("fresh_widget", "auto", None, 20, 4_000, root).unwrap();
+    let definition = graph_query("def", "fresh_widget", 1, 4_000, root).unwrap();
+    let pack = pack_query("fresh_widget", 4_000, "edit", root).unwrap();
+    assert_ne!(
+        search.coverage, "complete",
+        "search must not claim complete coverage with an unindexed admitted file"
+    );
+    assert_ne!(
+        definition.coverage, "complete",
+        "graph def must not claim complete coverage with an unindexed admitted file"
+    );
+    assert_ne!(
+        pack.coverage, "complete",
+        "pack must not claim complete coverage with an unindexed admitted file"
     );
 }

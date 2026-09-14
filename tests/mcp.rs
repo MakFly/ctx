@@ -92,12 +92,9 @@ async fn stdio_server_lists_and_calls_four_tools() -> anyhow::Result<()> {
     .await?;
     assert!(one_shot["tokens"].as_u64().unwrap() <= 800);
     assert_eq!(one_shot["coverage"], "partial");
-    assert!(
-        !one_shot["hint"]
-            .as_str()
-            .unwrap()
-            .starts_with("answer-ready:")
-    );
+    let hint = one_shot["hint"].as_str().unwrap();
+    assert!(!hint.starts_with("answer-ready:"));
+    assert!(hint.contains("expand "));
     assert!(one_shot["hits"].as_array().unwrap().iter().any(|hit| {
         hit["path"] == "db.py"
             && hit["why"]
@@ -157,6 +154,17 @@ async fn compact_server_exposes_one_small_text_tool() -> anyhow::Result<()> {
     let tools = client.list_all_tools().await?;
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "ctx_pack");
+    let description = tools[0]
+        .description
+        .as_deref()
+        .unwrap_or_default()
+        .to_string();
+    let lower = description.to_ascii_lowercase();
+    assert!(
+        !lower.contains("call once, then answer") && !lower.contains("then answer"),
+        "{description}"
+    );
+    assert!(lower.contains("hint"), "{description}");
     assert_eq!(tools[0].input_schema["required"], json!(["query"]));
     assert_eq!(
         tools[0].input_schema["properties"]

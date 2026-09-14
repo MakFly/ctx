@@ -1,6 +1,7 @@
 //! Session-scoped filesystem maintenance. No detached processes or PID locks.
 // Portions Copyright (c) Microsoft Corporation. MIT: vendor/tgrep-core/LICENSE.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -317,7 +318,7 @@ pub fn check_coverage(
     if before.as_ref().is_none_or(|value| value.is_empty())
         || before != generation(start)
         || status(&root)["catching_up"].as_bool().unwrap_or(true)
-        || evidence_stale(&root, &envelope)
+        || evidence_stale(&root)
     {
         envelope.coverage = "partial".into();
         let hint = envelope.hint.get_or_insert_with(String::new);
@@ -329,32 +330,54 @@ pub fn check_coverage(
     envelope
 }
 
-fn evidence_stale(root: &Path, envelope: &crate::model::Envelope) -> bool {
+fn evidence_stale(root: &Path) -> bool {
     let Ok(connection) = rusqlite::Connection::open_with_flags(
         ctx_dir(root).join("index.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ) else {
         return true;
     };
-    let mut seen = HashSet::new();
-    for hit in &envelope.hits {
-        if !seen.insert(&hit.path) {
-            continue;
-        }
-        let Ok(metadata) = root.join(&hit.path).metadata() else {
+    let indexed = (|| -> rusqlite::Result<HashMap<String, String>> {
+        let mut statement = connection.prepare(
+            "SELECT f.path, COALESCE(c.version,'') FROM files f LEFT JOIN file_contents c ON c.file_id=f.id",
+        )?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect()
+    })();
+    let Ok(indexed) = indexed else {
+        return true;
+    };
+    let Ok(walk) = crate::indexer::walk_metadata_report(root) else {
+        return true;
+    };
+    if walk.errors > 0 {
+        return true;
+    }
+    let mut matched = 0;
+    for path in walk.paths {
+        let Ok(relative) = crate::config::relative_path(&path, root) else {
             return true;
         };
-        let indexed: Option<String> = connection.query_row(
-            "SELECT c.version FROM file_contents c JOIN files f ON f.id=c.file_id WHERE f.path=?1",
-            [&hit.path], |row| row.get(0),
-        ).ok();
-        if indexed.as_deref()
-            != Some(format!("{:?}", ctx_tgrep::builder::file_version(&metadata)).as_str())
-        {
+        let Ok(metadata) = path.metadata() else {
             return true;
+        };
+        let version = format!("{:?}", ctx_tgrep::builder::file_version(&metadata));
+        match indexed.get(&relative) {
+            Some(stored) if stored == &version => matched += 1,
+            Some(_) => return true,
+            None if snapshot_skips_live(&path) => {}
+            None => return true,
         }
     }
-    false
+    matched != indexed.len()
+}
+
+fn snapshot_skips_live(path: &Path) -> bool {
+    let mut header = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(8192).read_to_end(&mut header))
+        .is_ok_and(|_| ctx_tgrep::trigram::is_binary(&header))
 }
 
 pub(crate) fn clear_state_after_manual(root: &Path) {

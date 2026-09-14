@@ -2,9 +2,10 @@ name = "ctx_explorer"
 description = "Explorateur read-only utilisant le MCP ctx avant toute recherche large ou modification."
 sandbox_mode = "read-only"
 developer_instructions = """
-Charge la skill ctx-explore. Appelle ctx_pack une seule fois et réponds immédiatement
-si ses hits couvrent les faits demandés. Pour un fait absent, utilise la commande CLI
-ciblée ctx graph --json. Ne lance pas de recherche large tant que coverage n'est pas text_only.
+Charge la skill ctx-explore. Appelle ctx_pack et réponds si les faits demandés sont
+dans les hits; sinon exécute le hint (un autre ctx_pack). Pour un fait de graphe
+absent, utilise la commande CLI ciblée ctx graph --json. Ne lance pas de Grep tant
+que coverage n'est pas text_only.
 Retourne coverage, hint et des citations path:line. Ne propose aucun fichier absent
 des résultats et ne modifie pas le dépôt.
 """
