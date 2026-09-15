@@ -36,6 +36,8 @@ CREATE INDEX IF NOT EXISTS idx_agent_cache_created ON agent_cache(created_at);
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub cached_input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
 }
@@ -57,6 +59,10 @@ pub struct AgentResult {
     #[serde(default)]
     pub validation_ms: u128,
     pub usage: TokenUsage,
+    #[serde(default)]
+    pub ctx_tokens: usize,
+    #[serde(default)]
+    pub question_hash: Option<String>,
     pub hits: Vec<Hit>,
     pub coverage: String,
     pub hint: Option<String>,
@@ -287,6 +293,8 @@ mod tests {
             harness_ms: 1,
             validation_ms: 0,
             usage: TokenUsage::default(),
+            ctx_tokens: 0,
+            question_hash: None,
             hits: Vec::new(),
             coverage: "complete".to_owned(),
             hint: None,

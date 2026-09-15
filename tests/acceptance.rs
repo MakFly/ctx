@@ -6,7 +6,9 @@ use ctx_code::briefing::generate_briefing;
 use ctx_code::config::ctx_dir;
 use ctx_code::db::connect;
 use ctx_code::graph::graph_query;
-use ctx_code::indexer::index_repository;
+use ctx_code::indexer::{
+    IndexProgress, index_repository, index_repository_with_options_and_progress,
+};
 use ctx_code::map::build_map;
 use ctx_code::pack::pack_query;
 use ctx_code::search::search_index;
@@ -55,6 +57,31 @@ fn indexes_schema_and_skips_unchanged_files() {
             .unwrap();
         assert!(exists, "missing {table}");
     }
+}
+
+#[test]
+fn indexing_reports_scan_and_file_progress() {
+    let (_temporary, root) = fixture();
+    let mut events = Vec::new();
+    let result = index_repository_with_options_and_progress(&root, false, &mut |event| {
+        events.push(event);
+    })
+    .unwrap();
+
+    assert!(result.changed > 0);
+    assert!(matches!(
+        events.first(),
+        Some(IndexProgress::Scanning { files }) if *files > 0
+    ));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        IndexProgress::Indexing { current, total } if *total > 0 && *current == *total
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, IndexProgress::Finalizing))
+    );
 }
 
 #[test]

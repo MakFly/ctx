@@ -141,11 +141,13 @@ pub fn install(root: &Path, target: &str, mode: &str) -> Result<Vec<PathBuf>> {
         copy_skill(&skill)?;
         write(root.join(".claude/agents/ctx-explorer.md"), CLAUDE_AGENT)?;
         install_json_mcp(&root.join(".mcp.json"))?;
+        install_claude_metrics_hooks(&root.join(".claude/settings.json"))?;
         append_once(&root.join("CLAUDE.md"), CLAUDE_SNIPPET)?;
         installed.extend([
             skill.join("SKILL.md"),
             root.join(".claude/agents/ctx-explorer.md"),
             root.join(".mcp.json"),
+            root.join(".claude/settings.json"),
             root.join("CLAUDE.md"),
         ]);
     }
@@ -187,10 +189,12 @@ pub fn install(root: &Path, target: &str, mode: &str) -> Result<Vec<PathBuf>> {
         copy_skill(&skill)?;
         write(root.join(".cursor/agents/ctx-explorer.md"), CURSOR_AGENT)?;
         install_json_mcp(&root.join(".cursor/mcp.json"))?;
+        install_cursor_metrics_hooks(&root.join(".cursor/hooks.json"))?;
         installed.extend([
             skill.join("SKILL.md"),
             root.join(".cursor/agents/ctx-explorer.md"),
             root.join(".cursor/mcp.json"),
+            root.join(".cursor/hooks.json"),
         ]);
     }
     Ok(installed)
@@ -228,6 +232,7 @@ fn planned_paths(selected: &BTreeSet<String>) -> Vec<PathBuf> {
             ".claude/skills/ctx-explore/SKILL.md",
             ".claude/agents/ctx-explorer.md",
             ".mcp.json",
+            ".claude/settings.json",
             "CLAUDE.md",
         ]);
     }
@@ -254,6 +259,7 @@ fn planned_paths(selected: &BTreeSet<String>) -> Vec<PathBuf> {
             ".cursor/skills/ctx-explore/SKILL.md",
             ".cursor/agents/ctx-explorer.md",
             ".cursor/mcp.json",
+            ".cursor/hooks.json",
         ]);
     }
     let mut unique = Vec::new();
@@ -326,6 +332,71 @@ fn install_json_mcp(path: &Path) -> Result<()> {
         "ctx".to_owned(),
         json!({"type": "stdio", "command": "ctx", "args": ["mcp"]}),
     );
+    write_json(path, &config)
+}
+
+fn install_claude_metrics_hooks(path: &Path) -> Result<()> {
+    let mut config = load_json(path)?;
+    let hooks = config
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .with_context(|| format!("hooks doit être un objet: {}", path.display()))?;
+    for (event, command) in [
+        ("Stop", "ctx hook after-turn --harness claude"),
+        ("SessionEnd", "ctx hook after-turn --harness claude"),
+    ] {
+        let entries = hooks
+            .entry(event)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .with_context(|| format!("hooks.{event} doit être un tableau: {}", path.display()))?;
+        let present = entries.iter().any(|entry| {
+            entry
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(|nested| {
+                    nested
+                        .iter()
+                        .any(|hook| hook.get("command").and_then(Value::as_str) == Some(command))
+                })
+        });
+        if !present {
+            entries.push(json!({
+                "hooks": [{
+                    "type": "command",
+                    "command": command
+                }]
+            }));
+        }
+    }
+    write_json(path, &config)
+}
+
+fn install_cursor_metrics_hooks(path: &Path) -> Result<()> {
+    let mut config = load_json(path)?;
+    config.entry("version").or_insert_with(|| json!(1));
+    let hooks = config
+        .entry("hooks")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .with_context(|| format!("hooks doit être un objet: {}", path.display()))?;
+    for (event, command) in [
+        ("afterFileEdit", "ctx hook after-turn --harness cursor"),
+        ("sessionEnd", "ctx hook after-turn --harness cursor"),
+    ] {
+        let entries = hooks
+            .entry(event)
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .with_context(|| format!("hooks.{event} doit être un tableau: {}", path.display()))?;
+        let present = entries
+            .iter()
+            .any(|entry| entry.get("command").and_then(Value::as_str) == Some(command));
+        if !present {
+            entries.push(json!({"command": command}));
+        }
+    }
     write_json(path, &config)
 }
 

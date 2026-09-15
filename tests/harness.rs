@@ -87,6 +87,7 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
     for path in [
         ".claude/skills/ctx-explore/SKILL.md",
         ".claude/agents/ctx-explorer.md",
+        ".claude/settings.json",
         ".agents/skills/ctx-explore/SKILL.md",
         ".codex/agents/ctx-explorer.toml",
         ".grok/config.toml",
@@ -94,6 +95,7 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
         ".opencode/agents/ctx-explorer.md",
         ".cursor/skills/ctx-explore/SKILL.md",
         ".cursor/agents/ctx-explorer.md",
+        ".cursor/hooks.json",
     ] {
         assert!(root.join(path).is_file(), "missing {path}");
     }
@@ -120,14 +122,29 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
         1
     );
     let claude = read_json(&root.join(".mcp.json"));
+    let claude_settings = read_json(&root.join(".claude/settings.json"));
     let cursor = read_json(&root.join(".cursor/mcp.json"));
+    let cursor_hooks = read_json(&root.join(".cursor/hooks.json"));
     let opencode = read_json(&root.join("opencode.json"));
     assert_eq!(claude["keep"], true);
     assert_eq!(
         claude["mcpServers"]["ctx"]["args"],
         serde_json::json!(["mcp"])
     );
+    assert!(
+        claude_settings["hooks"]["Stop"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("ctx hook after-turn")
+    );
     assert_eq!(cursor["keep"], true);
+    assert_eq!(cursor_hooks["version"], 1);
+    assert!(
+        cursor_hooks["hooks"]["afterFileEdit"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("ctx hook after-turn")
+    );
     assert_eq!(opencode["theme"], "dark");
     assert_eq!(
         opencode["mcp"]["servers"]["ctx"]["command"],

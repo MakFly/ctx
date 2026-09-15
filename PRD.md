@@ -80,6 +80,8 @@ ctx mcp                serveur MCP stdio
 .ctx/briefing.json     compte rendu machine
 .ctx/map.json          carte déterministe
 SKILL.md / AGENTS.md   playbook harness
+.ctx/metrics.sqlite     metrics projet
+~/.ctx/metrics.sqlite   agrégat global
 ```
 
 Quatre commandes utilisateur. Pas plus.
@@ -138,6 +140,11 @@ Répertoire `.ctx/` à la racine du repo (gitignore-able, commitable au choix) :
 
 SQLite WAL + FTS5 pour métadonnées, symboles, arêtes et lexical MVP.
 V1.1 : fichiers mmap pour postings n-grams (lookup table triée + postings), modèle Cursor Instant Grep / Zoekt simplifié, sans changer l'API.
+
+Les métriques sont d'abord écrites dans une queue append-only sous .ctx/,
+puis agrégées par un worker détaché. Elles séparent les tokens de preuve ctx,
+les tokens provider et les économies calculées à partir d'un baseline comparable.
+Les questions ne sont pas conservées : seuls leurs hashes sont enregistrés.
 
 ---
 
@@ -457,6 +464,7 @@ Mesurés sur un repo fixe + 20 tâches d'exploration (trouver un flux, préparer
 | Tokens hits bruts | 20k–200k | ≤ 3k |
 | Accuracy définition (def vs homonyme) | grep ~60 % | ≥ 85 % |
 | Réutilisation briefing session N+1 | 0 % | l'agent ne relance pas explore si SHA identique |
+| Mesure usage ctx | absente | rapport projet et global asynchrone |
 
 ---
 

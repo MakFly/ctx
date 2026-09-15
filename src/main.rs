@@ -1,8 +1,9 @@
 use std::fs;
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ctx_code::briefing::generate_briefing;
 use ctx_code::cache::CacheStore;
@@ -11,6 +12,7 @@ use ctx_code::db::{connect, get_meta};
 use ctx_code::gitinfo::git_info;
 use ctx_code::graph::graph_query;
 use ctx_code::harness::{install, installation_plan};
+use ctx_code::indexer::IndexProgress;
 use ctx_code::map::build_map;
 use ctx_code::model::Envelope;
 use ctx_code::pack::pack_query;
@@ -43,6 +45,21 @@ enum Command {
         /// Verify file contents even when size and modification time are unchanged.
         #[arg(long)]
         force: bool,
+    },
+    /// Queue or run an incremental reindex.
+    Reindex {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        background: bool,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Internal detached reindex worker.
+    #[command(name = "reindex-worker", hide = true)]
+    ReindexWorker {
+        #[arg(long)]
+        root: PathBuf,
     },
     /// Show index and Git freshness.
     Status {
@@ -136,6 +153,16 @@ enum Command {
         #[command(subcommand)]
         command: CacheCommand,
     },
+    /// Measure ctx usage, token counts and estimated savings.
+    Metrics {
+        #[command(subcommand)]
+        command: MetricsCommand,
+    },
+    /// Receive a harness lifecycle event and enqueue background work.
+    Hook {
+        #[command(subcommand)]
+        command: HookCommand,
+    },
     /// Inspect the future optional embedding layer.
     Embeddings {
         #[command(subcommand)]
@@ -214,6 +241,104 @@ enum CacheCommand {
         kind: String,
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MetricsCommand {
+    /// Show queued and persisted metric counters.
+    Status {
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Aggregate metrics for the current project or all projects.
+    Report {
+        #[arg(long)]
+        global: bool,
+        #[arg(long, conflicts_with = "global")]
+        project: bool,
+        #[arg(long, default_value_t = 30)]
+        since_days: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export raw metric events as JSON.
+    Export {
+        #[arg(long)]
+        global: bool,
+        #[arg(long, default_value_t = 30)]
+        since_days: u64,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Record a no-ctx measurement to pair with a ctx.run event.
+    Baseline {
+        #[arg(long)]
+        harness: String,
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        query: String,
+        #[arg(long)]
+        input_tokens: u64,
+        #[arg(long)]
+        output_tokens: u64,
+    },
+    /// Configure model pricing used by reports.
+    Pricing {
+        #[command(subcommand)]
+        command: MetricsPricingCommand,
+    },
+    /// Internal asynchronous queue worker.
+    #[command(hide = true)]
+    Drain {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Enqueue a harness hook payload without waiting for aggregation.
+    #[command(hide = true)]
+    Enqueue {
+        #[arg(long)]
+        event_kind: String,
+        #[arg(long)]
+        harness: String,
+        #[arg(long)]
+        model: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MetricsPricingCommand {
+    /// Set input, cached-input and output rates per million tokens.
+    Set {
+        #[arg(long)]
+        model: String,
+        #[arg(long)]
+        input_per_million: f64,
+        #[arg(long)]
+        cached_input_per_million: f64,
+        #[arg(long)]
+        output_per_million: f64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List configured model prices.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum HookCommand {
+    /// Enqueue metrics and incremental reindex work.
+    AfterTurn {
+        #[arg(long)]
+        harness: String,
+        #[arg(long)]
+        model: Option<String>,
     },
 }
 
@@ -321,6 +446,84 @@ enum EmbeddingProvider {
     Api,
 }
 
+struct IndexProgressBar {
+    enabled: bool,
+    active: bool,
+    last_draw: Instant,
+}
+
+impl IndexProgressBar {
+    fn new() -> Self {
+        Self {
+            enabled: ctx_code::terminal::stderr_enabled(),
+            active: false,
+            last_draw: Instant::now() - Duration::from_secs(1),
+        }
+    }
+
+    fn update(&mut self, progress: IndexProgress) {
+        if !self.enabled {
+            return;
+        }
+        let force_draw = matches!(
+            progress,
+            IndexProgress::Indexing { current, total } if current == total
+        ) || matches!(progress, IndexProgress::Finalizing);
+        if !force_draw && self.last_draw.elapsed() < Duration::from_millis(80) {
+            return;
+        }
+        let (message, color) = match progress {
+            IndexProgress::Scanning { files } => (format!("ctx: scanning files ({files})"), 33),
+            IndexProgress::Indexing { current: _, total } if total == 0 => {
+                ("ctx: indexing files (no changes)".to_owned(), 34)
+            }
+            IndexProgress::Indexing { current, total } => {
+                let percent = (current.min(total) as u128 * 100 / total as u128) as usize;
+                let width = 32;
+                let filled = width * percent / 100;
+                let bar = format!(
+                    "{}>{}",
+                    "=".repeat(filled.saturating_sub(1)),
+                    " ".repeat(width.saturating_sub(filled))
+                );
+                (
+                    format!("ctx: indexing [{bar}] {percent:>3}% ({current}/{total})"),
+                    if percent == 100 { 32 } else { 36 },
+                )
+            }
+            IndexProgress::Finalizing => ("ctx: finalizing index".to_owned(), 35),
+        };
+        self.draw(&message, color);
+    }
+
+    fn draw(&mut self, message: &str, color: u8) {
+        let mut stderr = io::stderr().lock();
+        let message = ctx_code::terminal::stderr(message, color);
+        let _ = write!(stderr, "\r\x1b[2K{message}");
+        let _ = stderr.flush();
+        self.active = true;
+        self.last_draw = Instant::now();
+    }
+
+    fn finish(&mut self) {
+        if self.active {
+            let mut stderr = io::stderr().lock();
+            let _ = write!(stderr, "\r\x1b[2K");
+            let _ = stderr.flush();
+            self.active = false;
+        }
+    }
+
+    fn fail(&mut self) {
+        if self.active {
+            let mut stderr = io::stderr().lock();
+            let _ = writeln!(stderr, "\r\x1b[2K");
+            let _ = stderr.flush();
+            self.active = false;
+        }
+    }
+}
+
 impl SearchMode {
     fn as_str(self) -> &'static str {
         match self {
@@ -402,7 +605,10 @@ enum_string!(EmbeddingProvider {
 #[tokio::main]
 async fn main() {
     if let Err(error) = execute(Cli::parse()).await {
-        eprintln!("ctx: {error:#}");
+        eprintln!(
+            "{}",
+            ctx_code::terminal::stderr(format!("ctx: {error:#}"), 31)
+        );
         std::process::exit(1);
     }
 }
@@ -414,16 +620,77 @@ async fn execute(cli: Cli) -> Result<()> {
             if watch {
                 let root = path.canonicalize()?;
                 let _session = ctx_code::watcher::WatchSession::start_with_force(&root, force)?;
-                eprintln!("ctx: watching {}; Ctrl-C to stop", root.display());
+                eprintln!(
+                    "{}",
+                    ctx_code::terminal::stderr(
+                        format!("ctx: watching {}; Ctrl-C to stop", root.display()),
+                        36
+                    )
+                );
                 tokio::signal::ctrl_c().await?;
+                return Ok(());
+            }
+            let mut progress = IndexProgressBar::new();
+            let result = {
+                let mut report_progress = |event| progress.update(event);
+                ctx_code::indexer::index_repository_with_options_and_progress(
+                    path,
+                    force,
+                    &mut report_progress,
+                )
+            };
+            let result = match result {
+                Ok(result) => {
+                    progress.finish();
+                    result
+                }
+                Err(error) => {
+                    progress.fail();
+                    return Err(error);
+                }
+            };
+            println!(
+                "{}",
+                ctx_code::terminal::stdout(
+                    format!(
+                        "indexed {} files ({} changed), {} symbols, {} edges",
+                        result.files, result.changed, result.symbols, result.edges
+                    ),
+                    32
+                )
+            );
+            println!("{}", result.database.display());
+            Ok(())
+        }
+        Command::Reindex {
+            path,
+            background,
+            force,
+        } => {
+            if background {
+                let root = repo_root(&path)?;
+                ctx_code::reindex::request_async(&root, force)?;
+                println!(
+                    "{}",
+                    ctx_code::terminal::stdout(format!("reindex queued {}", root.display()), 36)
+                );
                 return Ok(());
             }
             let result = ctx_code::indexer::index_repository_with_options(path, force)?;
             println!(
-                "indexed {} files ({} changed), {} symbols, {} edges",
-                result.files, result.changed, result.symbols, result.edges
+                "{}",
+                ctx_code::terminal::stdout(
+                    format!(
+                        "reindexed {} files ({} changed), {} symbols, {} edges",
+                        result.files, result.changed, result.symbols, result.edges
+                    ),
+                    32
+                )
             );
-            println!("{}", result.database.display());
+            Ok(())
+        }
+        Command::ReindexWorker { root } => {
+            ctx_code::reindex::drain(&root)?;
             Ok(())
         }
         Command::Status { json } => emit(&status()?, json),
@@ -547,20 +814,25 @@ async fn execute(cli: Cli) -> Result<()> {
                 emit(&result, true)
             } else {
                 println!("{}", result.answer);
+                let cached = result.cached;
                 eprintln!(
-                    "ctx: {} via {} in {}ms",
-                    if result.cached {
-                        "cache hit"
-                    } else {
-                        "cache miss"
-                    },
-                    result.harness,
-                    result.duration_ms
+                    "{}",
+                    ctx_code::terminal::stderr(
+                        format!(
+                            "ctx: {} via {} in {}ms",
+                            if cached { "cache hit" } else { "cache miss" },
+                            result.harness,
+                            result.duration_ms
+                        ),
+                        if cached { 32 } else { 33 }
+                    )
                 );
                 Ok(())
             }
         }
         Command::Cache { command } => execute_cache(command),
+        Command::Metrics { command } => execute_metrics(command),
+        Command::Hook { command } => execute_hook(command),
         Command::Embeddings { command } => execute_embeddings(command),
         Command::Lsp { command } => execute_lsp(command).await,
         Command::Install(arguments) => execute_harness("install", arguments),
@@ -586,7 +858,10 @@ fn init() -> Result<()> {
             fs::write(&gitignore, format!("{}\n.ctx/\n", current.trim_end()))?;
         }
     }
-    println!("initialized {}", ctx_dir(&root).display());
+    println!(
+        "{}",
+        ctx_code::terminal::stdout(format!("initialized {}", ctx_dir(&root).display()), 32)
+    );
     Ok(())
 }
 
@@ -616,6 +891,353 @@ fn execute_cache(command: CacheCommand) -> Result<()> {
         ),
         CacheCommand::Clear { kind, json } => {
             emit(&json!({"removed": store.clear(&kind)?, "kind": kind}), json)
+        }
+    }
+}
+
+fn execute_metrics(command: MetricsCommand) -> Result<()> {
+    match command {
+        MetricsCommand::Status { global, json } => {
+            let root = std::env::current_dir()?;
+            emit(&ctx_code::metrics::status(&root, global)?, json)
+        }
+        MetricsCommand::Report {
+            global: _,
+            project,
+            since_days,
+            json,
+        } => {
+            let root = std::env::current_dir()?;
+            let global = !project;
+            let report = ctx_code::metrics::report(&root, global, since_days)?;
+            if json {
+                return emit(&report, true);
+            }
+            print_metrics_dashboard(&report);
+            Ok(())
+        }
+        MetricsCommand::Export {
+            global,
+            since_days,
+            output,
+        } => {
+            let root = std::env::current_dir()?;
+            let events = ctx_code::metrics::export(&root, global, since_days)?;
+            let body = format!("{}\n", serde_json::to_string_pretty(&events)?);
+            if let Some(path) = output {
+                fs::write(path, body)?;
+            } else {
+                print!("{body}");
+            }
+            Ok(())
+        }
+        MetricsCommand::Baseline {
+            harness,
+            model,
+            query,
+            input_tokens,
+            output_tokens,
+        } => {
+            let root = std::env::current_dir()?;
+            ctx_code::metrics::record_baseline_async(
+                &root,
+                &harness,
+                &model,
+                &ctx_code::metrics::hash_query(&query),
+                input_tokens,
+                output_tokens,
+            )
+        }
+        MetricsCommand::Pricing { command } => match command {
+            MetricsPricingCommand::Set {
+                model,
+                input_per_million,
+                cached_input_per_million,
+                output_per_million,
+                json,
+            } => {
+                let pricing = ctx_code::metrics::set_pricing(
+                    &model,
+                    input_per_million,
+                    cached_input_per_million,
+                    output_per_million,
+                )?;
+                emit(&pricing, json)
+            }
+            MetricsPricingCommand::List { json } => {
+                let pricing = ctx_code::metrics::list_pricing()?;
+                emit(&pricing, json)
+            }
+        },
+        MetricsCommand::Drain { root } => {
+            let _ = ctx_code::metrics::drain(&root)?;
+            Ok(())
+        }
+        MetricsCommand::Enqueue {
+            event_kind,
+            harness,
+            model,
+        } => {
+            let mut body = String::new();
+            io::stdin().read_to_string(&mut body)?;
+            let payload = if body.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&body).context("hook payload JSON invalide")?
+            };
+            let root = std::env::current_dir()?;
+            ctx_code::metrics::record_hook_async(
+                &root,
+                &event_kind,
+                &harness,
+                model.as_deref(),
+                &payload,
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport) {
+    let scope = if report.scope == "global" {
+        "Global Scope"
+    } else {
+        "Project Scope"
+    };
+    println!(
+        "{}",
+        ctx_code::terminal::stdout(format!("CTX Token Savings ({scope})"), 32)
+    );
+    println!(
+        "{}",
+        ctx_code::terminal::stdout(
+            "============================================================",
+            32
+        )
+    );
+    println!();
+
+    let commands = report.mcp_calls + report.run_calls;
+    let average_ms = if commands == 0 {
+        0
+    } else {
+        report.total_duration_ms / commands
+    };
+    print_metric("Total commands", format_count(commands), 36);
+    print_metric("Input tokens", format_count(report.input_tokens), 36);
+    print_metric("Context tokens", format_count(report.ctx_tokens), 36);
+    print_metric("Output tokens", format_count(report.output_tokens), 36);
+    match (report.saved_input_tokens, report.baseline_input_tokens) {
+        (Some(saved), Some(baseline)) if baseline > 0 => {
+            let percent = saved as f64 * 100.0 / baseline as f64;
+            let confidence = if report.savings_confidence == "unknown" {
+                String::new()
+            } else {
+                format!(", {}", report.savings_confidence)
+            };
+            print_metric(
+                "Tokens saved",
+                format!("{} ({percent:.1}%{confidence})", format_count(saved)),
+                32,
+            );
+            print_metric("Efficiency meter", efficiency_meter(Some(percent)), 32);
+        }
+        _ => {
+            print_metric("Tokens saved", "n/a (baseline unavailable)".to_owned(), 33);
+            print_metric("Efficiency meter", efficiency_meter(None), 33);
+        }
+    }
+    print_metric(
+        "Total exec time",
+        format!(
+            "{} (avg {})",
+            format_duration(report.total_duration_ms),
+            format_duration(average_ms)
+        ),
+        36,
+    );
+    match report.estimated_cost_usd {
+        Some(cost) => print_metric("Estimated cost", format!("{cost:.6} USD"), 32),
+        None => print_metric("Estimated cost", "unknown pricing".to_owned(), 33),
+    }
+    if let Some(cost) = report.estimated_saved_cost_usd {
+        print_metric("Estimated saved cost", format!("{cost:.6} USD"), 32);
+    }
+    if report.cache_hits > 0 {
+        print_metric("Cache hits", format_count(report.cache_hits), 32);
+    }
+
+    println!();
+    println!("{}", ctx_code::terminal::stdout("By Operation", 32));
+    println!(
+        "{}",
+        ctx_code::terminal::stdout(
+            "--------------------------------------------------------------------------------",
+            32
+        )
+    );
+    println!(
+        "{:<4} {:<22} {:>8} {:>12} {:>8} {:>10} {}",
+        "#", "Operation", "Count", "Saved", "Avg%", "Time", "Impact"
+    );
+    println!(
+        "{}",
+        ctx_code::terminal::stdout(
+            "--------------------------------------------------------------------------------",
+            32
+        )
+    );
+    if report.by_operation.is_empty() {
+        println!(
+            "{}",
+            ctx_code::terminal::stdout("No operations recorded yet.", 33)
+        );
+    } else {
+        for (index, operation) in report.by_operation.iter().enumerate() {
+            let saved = operation
+                .saved_input_tokens
+                .map(format_count)
+                .unwrap_or_else(|| "-".to_owned());
+            let average = operation
+                .saved_input_tokens
+                .zip(operation.baseline_input_tokens)
+                .filter(|(_, baseline)| *baseline > 0)
+                .map(|(saved, baseline)| format!("{:.1}%", saved as f64 * 100.0 / baseline as f64))
+                .unwrap_or_else(|| "-".to_owned());
+            let impact = operation
+                .saved_input_tokens
+                .zip(operation.baseline_input_tokens)
+                .filter(|(_, baseline)| *baseline > 0)
+                .map(|(saved, baseline)| saved as f64 * 100.0 / baseline as f64);
+            let name = operation_name(&operation.name);
+            let name_color = if operation.saved_input_tokens.is_some() {
+                36
+            } else {
+                37
+            };
+            println!(
+                "{:<4} {} {:>8} {:>12} {:>8} {:>10} {}",
+                format!("{}.", index + 1),
+                ctx_code::terminal::stdout(format!("{name:<22}"), name_color),
+                format_count(operation.events),
+                saved,
+                average,
+                format_duration(operation.duration_ms),
+                ctx_code::terminal::stdout(
+                    impact_bar(impact, 12),
+                    if impact.is_some() { 36 } else { 33 }
+                )
+            );
+        }
+    }
+    println!(
+        "{}",
+        ctx_code::terminal::stdout(
+            "--------------------------------------------------------------------------------",
+            32
+        )
+    );
+    if report.scope == "global" && !report.by_project.is_empty() {
+        println!(
+            "{}",
+            ctx_code::terminal::stdout(
+                format!("Projects tracked: {}", report.by_project.len()),
+                36
+            )
+        );
+    }
+}
+
+fn print_metric(label: &str, value: String, value_color: u8) {
+    println!(
+        "{:<24} {}",
+        ctx_code::terminal::stdout(format!("{label}:"), 36),
+        ctx_code::terminal::stdout(value, value_color)
+    );
+}
+
+fn operation_name(value: &str) -> &str {
+    match value {
+        "mcp_pack" => "ctx_pack",
+        "mcp_search" => "ctx_search",
+        "mcp_graph" => "ctx_graph",
+        "mcp_file" => "ctx_file",
+        "ctx_run" => "ctx.run",
+        _ => value,
+    }
+}
+
+fn format_count(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn format_duration(milliseconds: u64) -> String {
+    if milliseconds >= 60_000 {
+        format!(
+            "{}m{:02}s",
+            milliseconds / 60_000,
+            (milliseconds / 1_000) % 60
+        )
+    } else if milliseconds >= 1_000 {
+        format!("{:.1}s", milliseconds as f64 / 1_000.0)
+    } else {
+        format!("{milliseconds}ms")
+    }
+}
+
+fn efficiency_meter(percent: Option<f64>) -> String {
+    let width = 36;
+    let Some(percent) = percent else {
+        return format!("[{}] n/a", ".".repeat(width));
+    };
+    let bounded = percent.clamp(0.0, 100.0);
+    let filled = (width as f64 * bounded / 100.0).round() as usize;
+    format!(
+        "[{}{}] {:.1}%",
+        "#".repeat(filled),
+        ".".repeat(width.saturating_sub(filled)),
+        percent
+    )
+}
+
+fn impact_bar(percent: Option<f64>, width: usize) -> String {
+    let Some(percent) = percent else {
+        return format!("[{}]", ".".repeat(width));
+    };
+    let filled = (width as f64 * percent.clamp(0.0, 100.0) / 100.0).round() as usize;
+    format!(
+        "[{}{}]",
+        "#".repeat(filled),
+        ".".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn execute_hook(command: HookCommand) -> Result<()> {
+    match command {
+        HookCommand::AfterTurn { harness, model } => {
+            let mut body = String::new();
+            io::stdin().read_to_string(&mut body)?;
+            let payload = if body.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&body).context("hook payload JSON invalide")?
+            };
+            let root = std::env::current_dir()?;
+            let _ = ctx_code::metrics::record_hook_async(
+                &root,
+                "after-turn",
+                &harness,
+                model.as_deref(),
+                &payload,
+            );
+            ctx_code::reindex::request_async(&root, false)?;
+            Ok(())
         }
     }
 }
@@ -813,7 +1435,7 @@ fn emit_envelope(value: &Envelope, as_json: bool) -> Result<()> {
     }
     for hit in &value.hits {
         println!(
-            "{}:{} {} {} — {}",
+            "{}:{} {} {}: {}",
             hit.path,
             hit.start,
             hit.kind,

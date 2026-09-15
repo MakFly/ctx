@@ -27,6 +27,13 @@ pub struct IndexResult {
     pub database: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexProgress {
+    Scanning { files: usize },
+    Indexing { current: usize, total: usize },
+    Finalizing,
+}
+
 #[derive(Debug)]
 struct PreparedFile {
     path: String,
@@ -65,13 +72,25 @@ pub fn walk_files(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 pub fn walk_report(root: &Path) -> Result<WalkReport> {
-    walk_report_inner(root, true)
+    let mut progress = |_event: IndexProgress| {};
+    walk_report_inner(root, true, &mut progress)
 }
 pub(crate) fn walk_metadata_report(root: &Path) -> Result<WalkReport> {
-    walk_report_inner(root, false)
+    let mut progress = |_event: IndexProgress| {};
+    walk_report_inner(root, false, &mut progress)
 }
 
-fn walk_report_inner(root: &Path, inspect_binary: bool) -> Result<WalkReport> {
+fn walk_metadata_report_with_progress<F>(root: &Path, progress: &mut F) -> Result<WalkReport>
+where
+    F: FnMut(IndexProgress),
+{
+    walk_report_inner(root, false, progress)
+}
+
+fn walk_report_inner<F>(root: &Path, inspect_binary: bool, progress: &mut F) -> Result<WalkReport>
+where
+    F: FnMut(IndexProgress),
+{
     let settings = index_settings(root)?;
     let excluded = ctx_dir(root)
         .canonicalize()
@@ -133,6 +152,9 @@ fn walk_report_inner(root: &Path, inspect_binary: bool) -> Result<WalkReport> {
         }
         if !inspect_binary {
             report.paths.push(entry.into_path());
+            progress(IndexProgress::Scanning {
+                files: report.paths.len(),
+            });
             continue;
         }
         let header = (|| -> std::io::Result<Vec<u8>> {
@@ -144,7 +166,10 @@ fn walk_report_inner(root: &Path, inspect_binary: bool) -> Result<WalkReport> {
         })();
         match header {
             Ok(bytes) if !ctx_tgrep::trigram::is_binary(&bytes) => {
-                report.paths.push(entry.into_path())
+                report.paths.push(entry.into_path());
+                progress(IndexProgress::Scanning {
+                    files: report.paths.len(),
+                });
             }
             Ok(_) => {}
             Err(_) => report.errors += 1,
@@ -161,10 +186,23 @@ pub fn index_repository(path: impl AsRef<Path>) -> Result<IndexResult> {
 }
 
 pub fn index_repository_with_options(path: impl AsRef<Path>, force: bool) -> Result<IndexResult> {
+    let mut progress = |_event: IndexProgress| {};
+    index_repository_with_options_and_progress(path, force, &mut progress)
+}
+
+pub fn index_repository_with_options_and_progress<F>(
+    path: impl AsRef<Path>,
+    force: bool,
+    progress: &mut F,
+) -> Result<IndexResult>
+where
+    F: FnMut(IndexProgress),
+{
     let root = repo_root(path)?;
     let _lock = crate::text_index::WriterLock::try_acquire(&ctx_dir(&root))?
         .context("index writer already active; stop its watcher before manual indexing")?;
-    let result = index_repository_locked(&root, force);
+    let result =
+        index_repository_locked_with_paths_and_progress(&root, force, &HashSet::new(), progress);
     if result.is_ok() {
         crate::watcher::clear_state_after_manual(&root);
     }
@@ -180,9 +218,22 @@ pub(crate) fn index_repository_locked_with_paths(
     force: bool,
     touched: &HashSet<PathBuf>,
 ) -> Result<IndexResult> {
+    let mut progress = |_event: IndexProgress| {};
+    index_repository_locked_with_paths_and_progress(root, force, touched, &mut progress)
+}
+
+pub(crate) fn index_repository_locked_with_paths_and_progress<F>(
+    root: &Path,
+    force: bool,
+    touched: &HashSet<PathBuf>,
+    progress: &mut F,
+) -> Result<IndexResult>
+where
+    F: FnMut(IndexProgress),
+{
     let database = ctx_dir(root).join("index.sqlite");
     let mut connection = connect(&database, true)?;
-    let report = walk_metadata_report(root)?;
+    let report = walk_metadata_report_with_progress(root, progress)?;
     // Do not turn an incomplete walk into deletions of unreadable subtrees.
     if report.errors > 0 {
         bail!("repository walk incomplete: {} errors", report.errors);
@@ -219,12 +270,18 @@ pub(crate) fn index_repository_locked_with_paths(
     let transaction = connection.transaction()?;
     let mut changed = 0;
     let mut changed_names = HashSet::new();
+    let total = changed_paths.len();
+    progress(IndexProgress::Indexing { current: 0, total });
     // Stream one bounded document at a time. ASTs and content do not accumulate
     // with corpus size, and the trigram builder later reads this same snapshot.
-    for path in changed_paths {
+    for (position, path) in changed_paths.into_iter().enumerate() {
         let relative = relative_path(&path, root)?;
         let Some(item) = prepare_file(root, &path)? else {
             current.remove(&relative);
+            progress(IndexProgress::Indexing {
+                current: position + 1,
+                total,
+            });
             continue;
         };
         if let Some(previous) = existing.get(&item.path)
@@ -239,11 +296,19 @@ pub(crate) fn index_repository_locked_with_paths(
                 "UPDATE file_contents SET version=?1 WHERE file_id=?2",
                 params![item.version, previous.id],
             )?;
+            progress(IndexProgress::Indexing {
+                current: position + 1,
+                total,
+            });
             continue;
         }
         changed += 1;
         changed_names.insert(item.path.clone());
         upsert_file(&transaction, &item)?;
+        progress(IndexProgress::Indexing {
+            current: position + 1,
+            total,
+        });
     }
     let removed = existing
         .iter()
@@ -272,6 +337,7 @@ pub(crate) fn index_repository_locked_with_paths(
     if changed > 0 || !removed.is_empty() || refresh_format {
         resolve_edges(&transaction)?;
     }
+    progress(IndexProgress::Finalizing);
     let staged =
         crate::text_index::stage_generation(&transaction, root, &changed_names, &removed_names)?;
     set_meta(

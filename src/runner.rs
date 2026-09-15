@@ -53,6 +53,7 @@ pub async fn run_question(root: &Path, options: RunOptions) -> Result<AgentResul
     let state = git_info(root);
     let state_id = repository_state(root, &state.sha)?;
     let pack = pack_query(&options.question, 800, "explore", root)?;
+    let question_hash = crate::metrics::hash_query(&options.question);
     let executable = detected_executable(&harness)?;
     require_project_integration(root, &harness)?;
     let version = executable_fingerprint(&executable)?;
@@ -91,6 +92,7 @@ pub async fn run_question(root: &Path, options: RunOptions) -> Result<AgentResul
             cached.cache_lookup_ms = cache_lookup_started.elapsed().as_millis();
             cached.harness_ms = 0;
             cached.usage = TokenUsage::default();
+            let _ = crate::metrics::record_agent_async(root, &cached);
             return Ok(cached);
         }
         store.delete(key)?;
@@ -124,6 +126,7 @@ pub async fn run_question(root: &Path, options: RunOptions) -> Result<AgentResul
                         cached.cache_lookup_ms = cache_lookup_started.elapsed().as_millis();
                         cached.harness_ms = 0;
                         cached.usage = TokenUsage::default();
+                        let _ = crate::metrics::record_agent_async(root, &cached);
                         return Ok(cached);
                     }
                 }
@@ -138,6 +141,7 @@ pub async fn run_question(root: &Path, options: RunOptions) -> Result<AgentResul
                 cached.cache_lookup_ms = cache_lookup_started.elapsed().as_millis();
                 cached.harness_ms = 0;
                 cached.usage = TokenUsage::default();
+                let _ = crate::metrics::record_agent_async(root, &cached);
                 return Ok(cached);
             }
             if wait_started.elapsed() >= options.timeout {
@@ -182,6 +186,8 @@ pub async fn run_question(root: &Path, options: RunOptions) -> Result<AgentResul
         harness_ms,
         validation_ms: 0,
         usage,
+        ctx_tokens: pack.tokens,
+        question_hash: Some(question_hash),
         hits: pack.hits,
         coverage: pack.coverage,
         hint: pack.hint,
@@ -220,6 +226,7 @@ pub async fn run_question(root: &Path, options: RunOptions) -> Result<AgentResul
     } else if model.is_none() {
         result.hint = Some("cache bypassé: modèle non résolu".to_owned());
     }
+    let _ = crate::metrics::record_agent_async(root, &result);
     Ok(result)
 }
 
@@ -544,6 +551,9 @@ fn extract_usage(stdout: &str) -> TokenUsage {
     for line in stdout.lines() {
         if let Ok(value) = serde_json::from_str::<Value>(line) {
             usage.input_tokens = find_number(&value, &["input_tokens"]).or(usage.input_tokens);
+            usage.cached_input_tokens =
+                find_number(&value, &["cached_input_tokens", "cached_tokens"])
+                    .or(usage.cached_input_tokens);
             usage.output_tokens = find_number(&value, &["output_tokens"]).or(usage.output_tokens);
             usage.reasoning_tokens =
                 find_number(&value, &["reasoning_output_tokens", "reasoning_tokens"])

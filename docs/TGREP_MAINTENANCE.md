@@ -75,6 +75,24 @@ shared hidden-file/ignore behavior and exclude generated ctx artifacts,
 including a redirected `CTX_DIR`. Do not equate text coverage with structural
 coverage, or with coverage of ignored/oversized files.
 
+**CLI progress.** Manual `ctx index` reports file discovery, changed-file
+processing and finalization through a terminal-only progress renderer on
+`stderr`. The indexer exposes progress callbacks for that CLI path while
+library, watcher and MCP callers use a no-op callback. The progress display
+does not alter the SQLite or text-generation publication boundaries.
+
+**Usage metrics.** MCP envelopes and ctx run results enqueue privacy-reduced
+metric events under the effective CTX_DIR. A detached worker writes the
+project ledger and, when enabled, the global ledger. It stores query hashes,
+not source questions. Provider token usage and ctx evidence tokens remain
+separate; token savings are not claimed without a comparable baseline.
+
+**Background reindex requests.** Harness lifecycle hooks append a coalesced
+request under the effective CTX_DIR and return immediately. The detached
+worker skips indexing when the MCP watcher owns the writer lock; otherwise it
+runs the existing incremental indexer. The writer lock remains the authority
+against concurrent publications.
+
 **Publication.** SQLite schema version and `text_index::FORMAT` currently are
 both `4`, but they describe separate compatibility boundaries. SQLite's
 `text_generation` points to immutable files under the effective `CTX_DIR/text/`.

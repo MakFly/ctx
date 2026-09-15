@@ -100,7 +100,7 @@ impl CtxMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::watcher::before_request(&self.root).map_err(mcp_error)?;
-        search_index_with_options(
+        let envelope = search_index_with_options(
             &request.query,
             &request.mode,
             request.ignore_case,
@@ -109,13 +109,18 @@ impl CtxMcp {
             request.budget_tokens,
             &self.root,
         )
-        .map_err(mcp_error)
-        .and_then(|envelope| {
-            let structured_only = context.peer.peer_info().is_some_and(|info| {
-                info.protocol_version >= rmcp::model::ProtocolVersion::V_2025_06_18
-            });
-            search_response(envelope, structured_only)
-        })
+        .map_err(mcp_error)?;
+        let _ = crate::metrics::record_mcp_async(
+            &self.root,
+            "mcp_search",
+            "mcp",
+            &request.query,
+            &envelope,
+        );
+        let structured_only = context.peer.peer_info().is_some_and(|info| {
+            info.protocol_version >= rmcp::model::ProtocolVersion::V_2025_06_18
+        });
+        search_response(envelope, structured_only)
     }
 
     #[tool(
@@ -133,15 +138,22 @@ impl CtxMcp {
         Parameters(request): Parameters<GraphRequest>,
     ) -> Result<Json<Envelope>, ErrorData> {
         crate::watcher::before_request(&self.root).map_err(mcp_error)?;
-        graph_query(
+        let envelope = graph_query(
             &request.op,
             &request.symbol,
             request.depth,
             1_500,
             &self.root,
         )
-        .map(Json)
-        .map_err(mcp_error)
+        .map_err(mcp_error)?;
+        let _ = crate::metrics::record_mcp_async(
+            &self.root,
+            "mcp_graph",
+            "mcp",
+            &format!("{} {}", request.op, request.symbol),
+            &envelope,
+        );
+        Ok(Json(envelope))
     }
 
     #[tool(
@@ -159,14 +171,21 @@ impl CtxMcp {
         Parameters(request): Parameters<PackRequest>,
     ) -> Result<Json<Envelope>, ErrorData> {
         crate::watcher::before_request(&self.root).map_err(mcp_error)?;
-        pack_query(
+        let envelope = pack_query(
             &request.query,
             request.budget_tokens.min(800),
             &request.intent,
             &self.root,
         )
-        .map(Json)
-        .map_err(mcp_error)
+        .map_err(mcp_error)?;
+        let _ = crate::metrics::record_mcp_async(
+            &self.root,
+            "mcp_pack",
+            "mcp",
+            &request.query,
+            &envelope,
+        );
+        Ok(Json(envelope))
     }
 
     #[tool(
@@ -184,9 +203,10 @@ impl CtxMcp {
         Parameters(request): Parameters<FileRequest>,
     ) -> Result<Json<Envelope>, ErrorData> {
         crate::watcher::before_request(&self.root).map_err(mcp_error)?;
-        file_query(&self.root, &request.q, request.limit)
-            .map(Json)
-            .map_err(mcp_error)
+        let envelope = file_query(&self.root, &request.q, request.limit).map_err(mcp_error)?;
+        let _ =
+            crate::metrics::record_mcp_async(&self.root, "mcp_file", "mcp", &request.q, &envelope);
+        Ok(Json(envelope))
     }
 }
 
@@ -247,6 +267,13 @@ impl CompactCtxMcp {
     ) -> Result<CallToolResult, ErrorData> {
         crate::watcher::before_request(&self.root).map_err(mcp_error)?;
         let envelope = pack_query(&request.query, 800, "explore", &self.root).map_err(mcp_error)?;
+        let _ = crate::metrics::record_mcp_async(
+            &self.root,
+            "mcp_pack",
+            "mcp",
+            &request.query,
+            &envelope,
+        );
         let body = serde_json::to_string(&envelope).map_err(|error| mcp_error(error.into()))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(body)]))
     }

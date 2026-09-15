@@ -35,6 +35,10 @@ ctx pack 'where is authentication handled?' --json
 Artifacts live under `.ctx/`. Set `CTX_DIR` to use another index directory.
 Git is optional and enables Git-aware freshness information.
 
+When `stderr` is an interactive terminal, `ctx index .` displays a live
+progress bar for file discovery, changed-file indexing and finalization. The
+progress output stays on `stderr`, so regular command output remains scriptable.
+
 ## Choose the right search
 
 | Command or mode | Purpose |
@@ -124,6 +128,15 @@ burst window. Startup, queue overflow, ignore-rule changes and hourly
 reconciliation repair drift. Linux watches admitted directories and relevant Git
 metadata; other backends watch recursively and filter artifact events.
 
+~~~console
+ctx reindex . --background
+~~~
+
+Installed harness hooks call ctx hook after-turn. That command only queues
+metrics and a reindex request, then exits. The detached worker coalesces
+requests, reuses the watcher when MCP is active and runs one incremental index
+when no watcher owns the project.
+
 This is not an atomic filesystem snapshot. Pending structural updates and detected
 read races produce partial coverage. Changes preserving every observable file
 version attribute require `ctx index . --force` or forced watcher reconciliation.
@@ -164,6 +177,57 @@ ctx cache prune --max-age-days 30 --max-size-mb 256 --json
 OpenCode and Cursor adapters require their project integration to be installed.
 Harness compatibility depends on supported CLI options; unsupported versions
 fail rather than silently broadening tool access.
+
+## Usage metrics
+
+Metric events are queued under .ctx/metrics.queue and aggregated by a
+detached worker, so MCP calls, hooks and ctx run do not wait for SQLite
+aggregation. Project events are stored in .ctx/metrics.sqlite; global events
+are stored in ~/.ctx/metrics.sqlite or the directory selected by
+CTX_GLOBAL_METRICS_DIR. Query hashes are stored instead of source questions.
+
+~~~console
+ctx metrics status --json
+ctx metrics report --since-days 30
+ctx metrics report --project --since-days 30
+ctx metrics report --global --json
+ctx metrics export --since-days 30 --output .ctx/metrics-export.json
+~~~
+
+ctx metrics report shows the global dashboard by default. Use
+--project for the current repository. It distinguishes provider usage from ctx
+evidence tokens.
+Provider usage is exact when the harness returns usage data. Savings remain
+exact when a comparable no-ctx baseline is recorded. MCP evidence calls also
+show estimated savings when ctx can estimate the source files represented by
+the returned evidence. Configure model pricing when needed:
+
+~~~console
+ctx metrics pricing set \
+  --model gpt-5.6-luna \
+  --input-per-million 0.20 \
+  --cached-input-per-million 0.02 \
+  --output-per-million 1.20
+~~~
+
+When MCP events do not carry a model name, a single configured pricing model
+is used for estimated saved cost. If several models are configured, ctx keeps
+the cost unknown until the harness identifies the model.
+
+Pair a no-ctx measurement with a ctx run when an exact saving is required:
+
+~~~console
+ctx metrics baseline \
+  --harness codex \
+  --model gpt-5.6-luna \
+  --query "where is authentication handled?" \
+  --input-tokens 77399 \
+  --output-tokens 1366
+~~~
+
+Claude Code and Cursor installations also add lightweight metrics hooks. They
+enqueue lifecycle payloads and return immediately. Codex, Grok and OpenCode
+are covered directly by MCP events even when no native hook is available.
 
 LSP reference enrichment is explicit and outside the search hot path:
 

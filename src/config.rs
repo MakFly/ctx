@@ -35,10 +35,17 @@ pub struct RunnerSettings {
 }
 
 #[derive(Debug, Clone)]
+pub struct MetricsSettings {
+    pub enabled: bool,
+    pub global: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct CtxConfig {
     pub default_harness: Option<String>,
     pub cache: CacheSettings,
     pub embeddings: EmbeddingSettings,
+    pub metrics: MetricsSettings,
 }
 
 impl Default for CtxConfig {
@@ -58,12 +65,16 @@ impl Default for CtxConfig {
                 api_key_env: String::new(),
                 allow_remote_code: false,
             },
+            metrics: MetricsSettings {
+                enabled: true,
+                global: true,
+            },
         }
     }
 }
 
 pub fn default_config_text() -> &'static str {
-    "# Set this before using `ctx run --harness auto`.\n# default_harness = \"codex\"\n\n[cache]\nenabled = true\nmax_size_mb = 256\nmax_age_days = 30\n\n[embeddings]\nenabled = false\nprovider = \"local\"\nmodel = \"\"\nendpoint = \"\"\napi_key_env = \"\"\nallow_remote_code = false\n"
+    "# Set this before using `ctx run --harness auto`.\n# default_harness = \"codex\"\n\n[cache]\nenabled = true\nmax_size_mb = 256\nmax_age_days = 30\n\n[metrics]\nenabled = true\nglobal = true\n\n[embeddings]\nenabled = false\nprovider = \"local\"\nmodel = \"\"\nendpoint = \"\"\napi_key_env = \"\"\nallow_remote_code = false\n"
 }
 
 pub fn load_config(root: &Path) -> Result<CtxConfig> {
@@ -113,6 +124,16 @@ pub fn load_config(root: &Path) -> Result<CtxConfig> {
             .get("allow_remote_code")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
+    }
+    if let Some(metrics) = document.get("metrics").and_then(|value| value.as_table()) {
+        config.metrics.enabled = metrics
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(config.metrics.enabled);
+        config.metrics.global = metrics
+            .get("global")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(config.metrics.global);
     }
     Ok(config)
 }
@@ -212,6 +233,19 @@ pub fn ctx_dir(root: &Path) -> PathBuf {
         }
         None => root.join(".ctx"),
     }
+}
+
+pub fn global_metrics_dir() -> PathBuf {
+    if let Some(value) = env::var_os("CTX_GLOBAL_METRICS_DIR") {
+        return PathBuf::from(value);
+    }
+    if let Some(value) = env::var_os("XDG_STATE_HOME") {
+        return PathBuf::from(value).join("ctx");
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ctx")
 }
 
 pub fn find_ctx(start: impl AsRef<Path>) -> Result<PathBuf> {
