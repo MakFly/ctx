@@ -77,9 +77,15 @@ ctx update --dry-run
 ctx update
 ```
 
-Individual targets are `claude`, `codex`, `opencode` and `cursor`. Installation
-merges existing JSON/TOML configuration and installs exploration skills and
-agents. Codex project trust remains a user-controlled setting.
+Individual targets are `claude`, `codex`, `grok`, `opencode` and `cursor`.
+Installation merges existing JSON/TOML configuration, installs exploration
+skills and agents, and adds `.ctx/` to an existing `.gitignore` without creating
+one when the project does not have it. Codex project trust remains a
+user-controlled setting.
+
+Project configuration files are `.mcp.json` for Claude Code, `.codex/config.toml`
+for Codex, `.grok/config.toml` for Grok, `opencode.json` for OpenCode, and
+`.cursor/mcp.json` for Cursor.
 
 For a manual MCP configuration, use `ctx` as the command and `mcp` as its argument.
 The stdio server exposes `ctx_search`, `ctx_graph`, `ctx_pack` and `ctx_file`.
@@ -189,6 +195,43 @@ The latest batch reduced historical debug MCP medians by 9–37% in seven of eig
 FastAPI scenarios; the absent query regressed 2%. Runs were separate, budgets
 were unlimited, and these are **not release performance claims**. Earlier
 release measurements predate that batch. There is no verified Zoekt speed ratio.
+
+### Paired agent run on iautos/core
+
+On 2026-09-15, the same repository question was run once with four targeted
+shell reads and once with one native `ctx_pack` MCP call. The target was the
+Symfony project `iautos/apps/core`: 2,083 indexed files, 8,194 symbols and
+40,861 static edges. Indexing took 9.71 seconds and was excluded from the agent
+timings below.
+
+Both runs used Codex CLI 0.154.0, `gpt-5.6-luna`, high reasoning effort, a
+read-only sandbox and the same question. The MCP run used the native project
+configuration after removing the nested sandbox wrapper that had caused an
+earlier `Transport closed` error.
+
+| Metric | Shell baseline | ctx MCP | Change with ctx |
+|---|---:|---:|---:|
+| Agent wall time | 33.02 s | 27.82 s | -15.7% |
+| Input tokens, total | 77,399 | 33,002 | -57.4% |
+| Cached input tokens | 62,208 | 22,784 | -63.4% |
+| Uncached input tokens | 15,191 | 10,218 | -32.7% |
+| Output tokens | 1,366 | 1,115 | -18.4% |
+| Reasoning output tokens | 743 | 783 | +5.4% |
+| Tool calls | 4 shell calls | 1 `ctx_pack` | -75.0% |
+| Estimated model cost | $0.00592 | $0.00384 | -35.2% |
+
+The cost estimate uses the GPT-5.6 Luna API rates of $0.20 per million
+uncached input tokens, $0.02 per million cached input tokens and $1.20 per
+million output tokens. It is an API-list-price estimate, not a Codex plan
+invoice. Without provider-side input caching, the same runs would be estimated
+at $0.01712 for the shell baseline and $0.00794 with ctx. See the [official
+GPT-5.6 Luna pricing](https://developers.openai.com/api/docs/models/gpt-5.6-luna).
+
+Both agents returned successful path and line citations for the requested
+symbols. The ctx envelope reported `coverage=partial`, because static graph
+coverage remains best-effort. This is one paired task on one repository, so it
+demonstrates the measured workflow overhead and token reduction without being
+a general performance claim.
 
 Benchmark scripts use existing executables and never compile or install tools.
 Python 3 is needed only for the Python benchmark scripts, not for ctx itself.

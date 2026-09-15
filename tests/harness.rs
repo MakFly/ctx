@@ -50,11 +50,20 @@ fn dry_run_detects_path_without_writing() {
 }
 
 #[test]
+fn install_does_not_create_gitignore_when_missing() {
+    let project = tempfile::tempdir().unwrap();
+    install(project.path(), "grok", "install").unwrap();
+    assert!(project.path().join(".grok/config.toml").is_file());
+    assert!(!project.path().join(".gitignore").exists());
+}
+
+#[test]
 fn installation_is_complete_idempotent_and_preserves_configuration() {
     let project = tempfile::tempdir().unwrap();
     let root = project.path();
     fs::write(root.join("CLAUDE.md"), "# Existing Claude rules\n").unwrap();
     fs::write(root.join("AGENTS.md"), "# Existing agent rules\n").unwrap();
+    fs::write(root.join(".gitignore"), "vendor/\n").unwrap();
     fs::write(root.join(".mcp.json"), "{\"keep\":true}\n").unwrap();
     fs::create_dir(root.join(".cursor")).unwrap();
     fs::write(root.join(".cursor/mcp.json"), "{\"keep\":true}\n").unwrap();
@@ -62,6 +71,12 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
     fs::write(
         root.join(".codex/config.toml"),
         "model_reasoning_effort = \"high\"\n",
+    )
+    .unwrap();
+    fs::create_dir(root.join(".grok")).unwrap();
+    fs::write(
+        root.join(".grok/config.toml"),
+        "[models]\ndefault = \"grok-build\"\n\n[mcp_servers.ctx]\ncustom = true\n",
     )
     .unwrap();
     fs::write(root.join("opencode.json"), "{\"theme\":\"dark\"}\n").unwrap();
@@ -74,6 +89,7 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
         ".claude/agents/ctx-explorer.md",
         ".agents/skills/ctx-explore/SKILL.md",
         ".codex/agents/ctx-explorer.toml",
+        ".grok/config.toml",
         ".opencode/skills/ctx-explore/SKILL.md",
         ".opencode/agents/ctx-explorer.md",
         ".cursor/skills/ctx-explore/SKILL.md",
@@ -92,6 +108,14 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
         fs::read_to_string(root.join("AGENTS.md"))
             .unwrap()
             .matches("ctx-explore:begin")
+            .count(),
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".gitignore"))
+            .unwrap()
+            .lines()
+            .filter(|line| line.trim() == ".ctx/")
             .count(),
         1
     );
@@ -117,6 +141,12 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
     assert!(codex.contains("args = [\"mcp\", \"--compact\"]"));
     assert_eq!(codex.matches("[mcp_servers.ctx.tools.ctx_pack]").count(), 1);
     assert!(codex.contains("output_token_limit = 1200"));
+    let grok = fs::read_to_string(root.join(".grok/config.toml")).unwrap();
+    assert!(grok.contains("default = \"grok-build\""));
+    assert!(grok.contains("custom = true"));
+    assert!(grok.contains("[mcp_servers.ctx]"));
+    assert!(grok.contains("args = [\"mcp\", \"--compact\"]"));
+    assert!(grok.contains("enabled = true"));
 
     let stale = root.join(".agents/skills/ctx-explore/SKILL.md");
     fs::write(&stale, "stale\n").unwrap();

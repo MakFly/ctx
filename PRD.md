@@ -1,6 +1,6 @@
-# PRD — ctx
+# PRD: ctx
 
-**Produit** : runner d'exploration de codebase pour harness d'agents (Claude Code, Codex, OpenCode, Cursor)
+**Produit** : runner d'exploration de codebase pour harness d'agents (Claude Code, Codex, Grok, OpenCode, Cursor)
 **Livrables associés** : index local ultra-rapide + compte rendu durable
 **Version** : 0.2
 **Statut** : implémentation Rust
@@ -15,7 +15,7 @@ Un agent de code perd la majorité de son temps à chercher : Glob, Grep, Read, 
 `ctx` inverse ça :
 
 - Indexer localement la codebase (lexical + symboles + graphe) pour répondre en millisecondes.
-- Orchestrer l'exploration via le harness, avec un playbook borné — pas une errance.
+- Orchestrer l'exploration via le harness, avec un playbook borné et structuré.
 - Écrire un compte rendu (`briefing.md` + `briefing.json`) qu'un humain ou le prochain agent peut charger au lieu de ré-explorer.
 
 Ce n'est pas un RAG cloud. Ce n'est pas un wrapper `rg`. C'est un dossier d'opération sur le repo, produit en < 90 s, cité `file:line`.
@@ -44,7 +44,7 @@ Constat mesuré (Entire.io, 2026) : passer `rg` de 14,7 ms à 1,7 ms ne change p
 - **G2.** Un appel `ctx explore` produit un briefing actionnable en ≤ 90 s (mode harness) ou ≤ 5 s (mode déterministe).
 - **G3.** Réduire d'au moins 50 % les tool calls d'exploration vs Grep+Read nu, et d'au moins 5× les tokens de hits bruts.
 - **G4.** Le briefing de session N+1 évite de ré-explorer tant que le SHA n'a pas divergé au-delà du seuil.
-- **G5.** Intégration native Claude Code + Codex (MCP + skill + CLI), 100 % local, aucun code envoyé hors machine.
+- **G5.** Intégration native Claude Code, Codex, Grok et OpenCode (MCP + skill + CLI), 100 % local, aucun code envoyé hors machine.
 
 ### 3.2 Non-goals (v1)
 
@@ -137,7 +137,7 @@ Répertoire `.ctx/` à la racine du repo (gitignore-able, commitable au choix) :
 ```
 
 SQLite WAL + FTS5 pour métadonnées, symboles, arêtes et lexical MVP.
-V1.1 : fichiers mmap pour postings n-grams (lookup table triée + postings), modèle Cursor Instant Grep / Zoekt simplifié — sans changer l'API.
+V1.1 : fichiers mmap pour postings n-grams (lookup table triée + postings), modèle Cursor Instant Grep / Zoekt simplifié, sans changer l'API.
 
 ---
 
@@ -158,7 +158,7 @@ ctx explore [--intent onboard|change|handoff|impact]
             [--budget 90s]
             [--out .ctx/]
 ctx mcp
-ctx install --target claude|codex|opencode
+ctx install --target claude|codex|grok|opencode
 ```
 
 Toute commande sauf `init` / `install` / `mcp` accepte `--json`.
@@ -229,8 +229,8 @@ Template unique, sections pondérées selon l'intent (voir §8.3).
 
 ### 8.2 Fichiers
 
-- `.ctx/briefing.md` — humain + agent
-- `.ctx/briefing.json` — machine, source de vérité
+- `.ctx/briefing.md`: humain + agent
+- `.ctx/briefing.json`: machine, source de vérité
 
 Le markdown est un rendu du JSON. Si divergence, le JSON gagne.
 
@@ -419,7 +419,7 @@ Texte court, impératif, voir le prompt compagnon.
 
 ## 12. Phases
 
-### MVP (2 semaines) — shippable
+### MVP (2 semaines): shippable
 
 - Binaire `ctx` : `init`, `index`, `status`, `search` (FTS5/BM25 + tree-sitter symbols), `graph def|refs|callers`, `map`, `explore --harness none`.
 - Envelope JSON unique.
@@ -452,7 +452,7 @@ Mesurés sur un repo fixe + 20 tâches d'exploration (trouver un flux, préparer
 
 | Métrique | Baseline (Grep+Read) | Cible MVP |
 |---|---|---|
-| Time-to-first-correct-file | — | −60 % |
+| Time-to-first-correct-file | non mesuré | −60 % |
 | Tool calls exploration | 12–20 | ≤ 6 |
 | Tokens hits bruts | 20k–200k | ≤ 3k |
 | Accuracy définition (def vs homonyme) | grep ~60 % | ≥ 85 % |
@@ -491,7 +491,7 @@ Mesurés sur un repo fixe + 20 tâches d'exploration (trouver un flux, préparer
 - Intent prioritaire du premier utilisateur : onboard vs change vs handoff ? (template identique, pondération seule).
 - Committer `.ctx/` dans git, ou le gitignorer par défaut ? Défaut : gitignore, `--commit-brief` optionnel.
 - Langage d'implémentation : Rust, non négociable. N-grams mmap / daemon en v1.1, contrats inchangés.
-- Headless harness : `claude -p` est instable selon versions — v1.1, pas MVP.
+- Headless harness : `claude -p` est instable selon versions. Prévu en v1.1, pas dans le MVP.
 
 ---
 
@@ -504,7 +504,7 @@ Mesurés sur un repo fixe + 20 tâches d'exploration (trouver un flux, préparer
 - Aider repo map : tree-sitter + PageRank + fit token budget.
 - Codebase-Memory / codebase-index : graphe SQLite + evidence contract.
 - Sourcegraph Code Finder : inner search loop, l'agent reçoit des spans pas des dumps.
-- Claude Code : agentic search volontairement sans index — on ajoute un index local, on ne remplace pas le harness.
+- Claude Code : agentic search volontairement sans index. On ajoute un index local sans remplacer le harness.
 
 ### B. Exemple de session cible
 

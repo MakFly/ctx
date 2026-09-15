@@ -7,10 +7,11 @@ use std::str::FromStr;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 const BEGIN: &str = "<!-- ctx-explore:begin -->";
 const END: &str = "<!-- ctx-explore:end -->";
-const TARGETS: &[&str] = &["claude", "codex", "cursor", "opencode"];
+const TARGETS: &[&str] = &["claude", "codex", "cursor", "grok", "opencode"];
 const SKILL: &str = include_str!("../skills/ctx-explore/SKILL.md");
 const OPENAI_SKILL: &str = include_str!("../skills/ctx-explore/agents/openai.yaml");
 const AGENTS_SNIPPET: &str = include_str!("../skills/AGENTS.snippet.md");
@@ -133,6 +134,7 @@ pub fn install(root: &Path, target: &str, mode: &str) -> Result<Vec<PathBuf>> {
             }
         );
     }
+    ensure_ctx_gitignore(root)?;
     let mut installed = Vec::new();
     if selected.contains("claude") {
         let skill = root.join(".claude/skills/ctx-explore");
@@ -159,6 +161,12 @@ pub fn install(root: &Path, target: &str, mode: &str) -> Result<Vec<PathBuf>> {
             root.join(".codex/config.toml"),
             root.join("AGENTS.md"),
         ]);
+    }
+    if selected.contains("grok") {
+        let config = root.join(".grok/config.toml");
+        install_grok_mcp(&config)?;
+        append_once(&root.join("AGENTS.md"), AGENTS_SNIPPET)?;
+        installed.extend([config, root.join("AGENTS.md")]);
     }
     if selected.contains("opencode") {
         let skill = root.join(".opencode/skills/ctx-explore");
@@ -231,6 +239,9 @@ fn planned_paths(selected: &BTreeSet<String>) -> Vec<PathBuf> {
             "AGENTS.md",
         ]);
     }
+    if selected.contains("grok") {
+        paths.extend([".grok/config.toml", "AGENTS.md"]);
+    }
     if selected.contains("opencode") {
         paths.extend([
             ".opencode/skills/ctx-explore/SKILL.md",
@@ -245,7 +256,14 @@ fn planned_paths(selected: &BTreeSet<String>) -> Vec<PathBuf> {
             ".cursor/mcp.json",
         ]);
     }
-    paths.into_iter().map(PathBuf::from).collect()
+    let mut unique = Vec::new();
+    for path in paths {
+        let path = PathBuf::from(path);
+        if !unique.contains(&path) {
+            unique.push(path);
+        }
+    }
+    unique
 }
 
 fn copy_skill(destination: &Path) -> Result<()> {
@@ -371,6 +389,56 @@ fn install_codex_mcp(path: &Path) -> Result<()> {
     toml_edit::DocumentMut::from_str(&text)
         .with_context(|| format!("TOML invalide, installation annulée: {}", path.display()))?;
     write(path.to_path_buf(), &text)
+}
+
+fn install_grok_mcp(path: &Path) -> Result<()> {
+    let current = read_existing(path)?;
+    let mut document = DocumentMut::from_str(&current)
+        .with_context(|| format!("TOML invalide, installation annulée: {}", path.display()))?;
+    let servers = document
+        .entry("mcp_servers")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("mcp_servers doit être une table: {}", path.display()))?;
+    let ctx = servers
+        .entry("ctx")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .with_context(|| format!("mcp_servers.ctx doit être une table: {}", path.display()))?;
+    ctx.insert("command", value("ctx"));
+    let mut args = Array::new();
+    args.push("mcp");
+    args.push("--compact");
+    ctx.insert("args", Item::Value(args.into()));
+    ctx.insert("enabled", value(true));
+    ctx.insert("startup_timeout_sec", value(30));
+    ctx.insert("tool_timeout_sec", value(6000));
+    write(path.to_path_buf(), &document.to_string())
+}
+
+fn ensure_ctx_gitignore(root: &Path) -> Result<()> {
+    let path = root.join(".gitignore");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let current = fs::read_to_string(&path)?;
+    if current.lines().any(ignores_ctx_directory) {
+        return Ok(());
+    }
+    let mut updated = current.trim_end().to_owned();
+    if !updated.is_empty() {
+        updated.push('\n');
+    }
+    updated.push_str(".ctx/\n");
+    fs::write(path, updated)?;
+    Ok(())
+}
+
+fn ignores_ctx_directory(line: &str) -> bool {
+    matches!(
+        line.trim(),
+        ".ctx" | ".ctx/" | "/.ctx" | "/.ctx/" | "**/.ctx/"
+    )
 }
 
 fn read_existing(path: &Path) -> Result<String> {
