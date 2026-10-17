@@ -147,13 +147,16 @@ fn register_directories(
     watcher: &mut RecommendedWatcher,
     root: &Path,
     registered: &mut HashSet<PathBuf>,
+    stop: &AtomicBool,
 ) -> Result<()> {
+    crate::indexer::check_cancelled(Some(stop))?;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        let mut desired: HashSet<PathBuf> = crate::indexer::walk_metadata_report(root)?
-            .directories
-            .into_iter()
-            .collect();
+        let mut desired: HashSet<PathBuf> =
+            crate::indexer::walk_metadata_report_cancellable(root, Some(stop))?
+                .directories
+                .into_iter()
+                .collect();
         // Only Git metadata which controls traversal/branch state; never object trees.
         for path in [root.join(".git"), root.join(".git/info")] {
             if path.is_dir() {
@@ -161,9 +164,11 @@ fn register_directories(
             }
         }
         for path in registered.difference(&desired) {
+            crate::indexer::check_cancelled(Some(stop))?;
             let _ = watcher.unwatch(path);
         }
         for path in desired.difference(registered) {
+            crate::indexer::check_cancelled(Some(stop))?;
             watcher.watch(path, RecursiveMode::NonRecursive)?;
         }
         *registered = desired;
@@ -203,8 +208,8 @@ fn run_owner(root: &Path, stop: &AtomicBool, _lock: &WriterLock, force: bool) ->
         }
     })?;
     let mut registered = HashSet::new();
-    register_directories(&mut watcher, root, &mut registered)?;
-    crate::indexer::index_repository_locked(root, force)?;
+    register_directories(&mut watcher, root, &mut registered, stop)?;
+    crate::indexer::index_repository_locked_cancellable(root, force, &HashSet::new(), stop)?;
     let mut last_reconciliation = chrono::Utc::now().timestamp_millis();
     let mut reconciled_at = Instant::now();
     let mut batch = EventBatch::default();
@@ -240,15 +245,20 @@ fn run_owner(root: &Path, stop: &AtomicBool, _lock: &WriterLock, force: bool) ->
         write_state(root, true, true, Some(last_reconciliation), None);
         // Re-register before and after updates so newly admitted directories
         // cannot remain invisible after an ignore-rule change or rename.
-        register_directories(&mut watcher, root, &mut registered)?;
-        match crate::indexer::index_repository_locked_with_paths(root, batch.full, &batch.paths) {
+        register_directories(&mut watcher, root, &mut registered, stop)?;
+        match crate::indexer::index_repository_locked_cancellable(
+            root,
+            batch.full,
+            &batch.paths,
+            stop,
+        ) {
             Ok(_) => {
                 if batch.full {
                     reconciled_at = Instant::now();
                     last_reconciliation = chrono::Utc::now().timestamp_millis();
                 }
                 batch = EventBatch::default();
-                register_directories(&mut watcher, root, &mut registered)?;
+                register_directories(&mut watcher, root, &mut registered, stop)?;
                 write_state(root, true, false, Some(last_reconciliation), None);
             }
             Err(error) => {

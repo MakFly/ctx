@@ -171,6 +171,27 @@ and remaining limitations. Never present old benchmark tables as new results.
 
 ## Verification and evidence
 
+### Watcher cancellation follow-up (2026-10-17)
+
+An orphaned MCP process (parent PID 1, stdin pipe with no remaining writer) kept
+an initial indexing transaction open in the operator's home index. Its WAL held
+1,972,231,672 bytes while the committed database contained only 29 pages.
+`WatchSession::drop` set the stop flag but joined an indexer that did not inspect
+it. Cancellation now reaches directory registration, traversal, per-file SQL
+updates, generation staging and the final pre-commit boundary. The same flag is
+used during initial and incremental indexing. Cancellation preserves the last
+committed graph/generation pair: SQLite rollback and `StagedGeneration::drop`
+discard the unfinished work. There are no intermediate batch commits.
+
+The vendored sorter and merge still finish their current operation before the
+next cancellation check. Individual file reads/parses and SQL statements are
+also cooperative boundaries. This change does not impose a hard WAL cap or
+guarantee immediate shutdown. No schema, index format or upstream revision
+changes are needed. Only formatting, offline Cargo metadata and static review
+were authorized for this follow-up; compilation and runtime tests have not run.
+See [the recovery evidence](STORAGE_RECOVERY.md) for measured WAL recovery,
+dependency EOF behavior, remaining limits and the unexecuted regression case.
+
 Non-compiling checks include `git diff --check`, targeted `rustfmt --check`,
 and `cargo metadata --locked --offline --format-version 1`. An offline metadata
 check requires dependencies to be cached. Formatting and dependency resolution

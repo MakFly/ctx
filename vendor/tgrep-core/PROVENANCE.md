@@ -42,6 +42,10 @@ installation of the tgrep executable, and it does not run its TCP server.
 - Publication follows upstream's staged-file principle, using a SQLite generation
   reference instead of moving files underneath a live reader. Shared file leases
   protect retired generations. Current and previous generations are retained.
+- The ctx watcher propagates cooperative cancellation through traversal, SQL
+  indexing and generation staging. Cancellation rolls back unpublished work;
+  the vendored sorter/merge completes its current operation before ctx checks
+  the flag again. No upstream files or on-disk formats change for this policy.
 
 Retain this provenance and the MIT notice when moving or redistributing these
 components. Changes to upstream modules should remain narrow; update the pinned

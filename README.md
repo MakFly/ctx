@@ -111,6 +111,10 @@ One OS-held lock permits one index writer. Other sessions observe publications
 and can take over when the owner exits. Manual indexing reports an active-writer
 error while a watcher owns the index. No permanent daemon is installed, and
 session shutdown stops and joins its worker.
+Shutdown cooperatively cancels an in-progress scan or index before publication.
+Cancelled SQL changes roll back and unpublished text generations are removed.
+A single file operation, SQL statement or external-sort/merge operation may still
+delay shutdown; this is not a hard WAL size or shutdown-time limit.
 
 Updates publish immutable trigram generations alongside SQLite transactions.
 Readers retain leases on generations in use. Unchanged reindexing preserves the

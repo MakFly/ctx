@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -226,6 +227,17 @@ pub fn stage_generation(
     changed: &HashSet<String>,
     removed: &HashSet<String>,
 ) -> Result<Option<StagedGeneration>> {
+    stage_generation_cancellable(connection, root, changed, removed, None)
+}
+
+pub(crate) fn stage_generation_cancellable(
+    connection: &Connection,
+    root: &Path,
+    changed: &HashSet<String>,
+    removed: &HashSet<String>,
+    stop: Option<&AtomicBool>,
+) -> Result<Option<StagedGeneration>> {
+    crate::indexer::check_cancelled(stop)?;
     let directory = ctx_dir(root);
     let old = open_generation(connection, &directory).ok();
     if old.is_some() && changed.is_empty() && removed.is_empty() {
@@ -250,6 +262,7 @@ pub fn stage_generation(
         )?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
+            crate::indexer::check_cancelled(stop)?;
             builder.push(row.get(0)?, &row.get::<_, String>(1)?)?;
         }
     } else {
@@ -259,11 +272,14 @@ pub fn stage_generation(
             "SELECT c.content FROM files f JOIN file_contents c ON c.file_id=f.id WHERE f.path=?1",
         )?;
         for path in paths {
+            crate::indexer::check_cancelled(stop)?;
             let content: String = statement.query_row([path], |row| row.get(0))?;
             builder.push(path.clone(), &content)?;
         }
     }
+    crate::indexer::check_cancelled(stop)?;
     builder.finish()?;
+    crate::indexer::check_cancelled(stop)?;
     if let Some(reader) = old {
         let delta = IndexReader::open(&delta_dir)?;
         let superseded = changed.union(removed).cloned().collect();
@@ -285,6 +301,7 @@ pub fn stage_generation(
         fs::remove_dir(&delta_dir)?;
     }
     for entry in fs::read_dir(&staged.directory)? {
+        crate::indexer::check_cancelled(stop)?;
         let path = entry?.path();
         if path.is_file() {
             OpenOptions::new().write(true).open(path)?.sync_all()?;
@@ -298,6 +315,7 @@ pub fn stage_generation(
     let reader = IndexReader::open(&staged.directory)?;
     reader.validate_lookup().map_err(anyhow::Error::msg)?;
     let previous = get_meta(connection, "text_generation", "")?;
+    crate::indexer::check_cancelled(stop)?;
     set_meta(connection, "previous_text_generation", &previous)?;
     set_meta(connection, "text_generation", &generation)?;
     Ok(Some(staged))

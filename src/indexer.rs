@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -73,21 +74,33 @@ pub fn walk_files(root: &Path) -> Result<Vec<PathBuf>> {
 
 pub fn walk_report(root: &Path) -> Result<WalkReport> {
     let mut progress = |_event: IndexProgress| {};
-    walk_report_inner(root, true, &mut progress)
+    walk_report_inner(root, true, &mut progress, None)
 }
 pub(crate) fn walk_metadata_report(root: &Path) -> Result<WalkReport> {
+    walk_metadata_report_cancellable(root, None)
+}
+
+pub(crate) fn walk_metadata_report_cancellable(
+    root: &Path,
+    stop: Option<&AtomicBool>,
+) -> Result<WalkReport> {
     let mut progress = |_event: IndexProgress| {};
-    walk_report_inner(root, false, &mut progress)
+    walk_report_inner(root, false, &mut progress, stop)
 }
 
-fn walk_metadata_report_with_progress<F>(root: &Path, progress: &mut F) -> Result<WalkReport>
-where
-    F: FnMut(IndexProgress),
-{
-    walk_report_inner(root, false, progress)
+pub(crate) fn check_cancelled(stop: Option<&AtomicBool>) -> Result<()> {
+    if stop.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        bail!("indexing cancelled: session stopped");
+    }
+    Ok(())
 }
 
-fn walk_report_inner<F>(root: &Path, inspect_binary: bool, progress: &mut F) -> Result<WalkReport>
+fn walk_report_inner<F>(
+    root: &Path,
+    inspect_binary: bool,
+    progress: &mut F,
+    stop: Option<&AtomicBool>,
+) -> Result<WalkReport>
 where
     F: FnMut(IndexProgress),
 {
@@ -125,6 +138,7 @@ where
         });
     let mut report = WalkReport::default();
     for entry in builder.build() {
+        check_cancelled(stop)?;
         let entry = match entry {
             Ok(value) => value,
             Err(_) => {
@@ -210,16 +224,18 @@ where
 }
 
 pub(crate) fn index_repository_locked(root: &Path, force: bool) -> Result<IndexResult> {
-    index_repository_locked_with_paths(root, force, &HashSet::new())
+    let mut progress = |_event: IndexProgress| {};
+    index_repository_locked_with_paths_and_progress(root, force, &HashSet::new(), &mut progress)
 }
 
-pub(crate) fn index_repository_locked_with_paths(
+pub(crate) fn index_repository_locked_cancellable(
     root: &Path,
     force: bool,
     touched: &HashSet<PathBuf>,
+    stop: &AtomicBool,
 ) -> Result<IndexResult> {
     let mut progress = |_event: IndexProgress| {};
-    index_repository_locked_with_paths_and_progress(root, force, touched, &mut progress)
+    index_repository_inner(root, force, touched, &mut progress, Some(stop))
 }
 
 pub(crate) fn index_repository_locked_with_paths_and_progress<F>(
@@ -231,9 +247,24 @@ pub(crate) fn index_repository_locked_with_paths_and_progress<F>(
 where
     F: FnMut(IndexProgress),
 {
+    index_repository_inner(root, force, touched, progress, None)
+}
+
+fn index_repository_inner<F>(
+    root: &Path,
+    force: bool,
+    touched: &HashSet<PathBuf>,
+    progress: &mut F,
+    stop: Option<&AtomicBool>,
+) -> Result<IndexResult>
+where
+    F: FnMut(IndexProgress),
+{
+    check_cancelled(stop)?;
     let database = ctx_dir(root).join("index.sqlite");
     let mut connection = connect(&database, true)?;
-    let report = walk_metadata_report_with_progress(root, progress)?;
+    let report = walk_report_inner(root, false, progress, stop)?;
+    check_cancelled(stop)?;
     // Do not turn an incomplete walk into deletions of unreadable subtrees.
     if report.errors > 0 {
         bail!("repository walk incomplete: {} errors", report.errors);
@@ -275,6 +306,7 @@ where
     // Stream one bounded document at a time. ASTs and content do not accumulate
     // with corpus size, and the trigram builder later reads this same snapshot.
     for (position, path) in changed_paths.into_iter().enumerate() {
+        check_cancelled(stop)?;
         let relative = relative_path(&path, root)?;
         let Some(item) = prepare_file(root, &path)? else {
             current.remove(&relative);
@@ -321,6 +353,7 @@ where
         .cloned()
         .collect();
     for file_id in &removed {
+        check_cancelled(stop)?;
         transaction.execute("DELETE FROM files_fts WHERE rowid=?1", [file_id])?;
         transaction.execute(
             "DELETE FROM symbols_fts WHERE rowid IN (SELECT id FROM symbols WHERE file_id=?1)",
@@ -335,11 +368,18 @@ where
         transaction.execute("DELETE FROM edges WHERE source='lsp'", [])?;
     }
     if changed > 0 || !removed.is_empty() || refresh_format {
+        check_cancelled(stop)?;
         resolve_edges(&transaction)?;
     }
+    check_cancelled(stop)?;
     progress(IndexProgress::Finalizing);
-    let staged =
-        crate::text_index::stage_generation(&transaction, root, &changed_names, &removed_names)?;
+    let staged = crate::text_index::stage_generation_cancellable(
+        &transaction,
+        root,
+        &changed_names,
+        &removed_names,
+        stop,
+    )?;
     set_meta(
         &transaction,
         "excluded_too_large",
@@ -359,6 +399,8 @@ where
     )?;
     set_meta(&transaction, "indexed_sha", &git.sha)?;
     set_meta(&transaction, "index_format", crate::text_index::FORMAT)?;
+    // Cancellation rolls back SQL and drops the unpublished generation together.
+    check_cancelled(stop)?;
     transaction.commit()?;
     if let Some(staged) = staged {
         staged.commit();
@@ -662,6 +704,55 @@ fn read_document_bytes(path: &Path, max_bytes: u64) -> Result<Option<(Vec<u8>, f
 #[cfg(test)]
 mod document_read_tests {
     use super::*;
+
+    #[test]
+    fn cancelled_index_preserves_committed_documents_and_generation() {
+        for cancel_during_finalization in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path();
+            fs::write(root.join("a.txt"), "committed").unwrap();
+            index_repository(root).unwrap();
+            let directory = ctx_dir(root);
+            let db = connect(&directory.join("index.sqlite"), false).unwrap();
+            let generation = get_meta(&db, "text_generation", "").unwrap();
+            let generation_paths = || {
+                fs::read_dir(directory.join("text"))
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .collect::<HashSet<_>>()
+            };
+            let published = generation_paths();
+            fs::write(root.join("a.txt"), "uncommitted replacement").unwrap();
+            fs::write(root.join("b.txt"), "uncommitted addition").unwrap();
+            let stop = AtomicBool::new(false);
+            let mut progress = |event| {
+                if (cancel_during_finalization && event == IndexProgress::Finalizing)
+                    || (!cancel_during_finalization
+                        && matches!(event, IndexProgress::Indexing { current: 1, .. }))
+                {
+                    stop.store(true, Ordering::Release);
+                }
+            };
+            let result =
+                index_repository_inner(root, false, &HashSet::new(), &mut progress, Some(&stop));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("indexing cancelled")
+            );
+            assert_eq!(get_meta(&db, "text_generation", "").unwrap(), generation);
+            let contents: Vec<String> = db
+                .prepare("SELECT content FROM file_contents")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(contents, ["committed"]);
+            assert_eq!(generation_paths(), published);
+        }
+    }
 
     #[test]
     fn search_and_index_readers_share_decoding_admission_and_hash_identity() {
