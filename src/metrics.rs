@@ -779,7 +779,10 @@ fn build_report(
         saved_input_tokens: (state.savings_events > 0).then_some(state.saved_input_tokens),
         saved_output_tokens: (state.saved_output_tokens > 0).then_some(state.saved_output_tokens),
         estimated_saved_cost_usd: state.saved_cost_usd,
-        savings_confidence: if state.exact_savings_events > 0 {
+        savings_confidence: if state.exact_savings_events > 0 && state.estimated_savings_events > 0
+        {
+            "mixed".to_owned()
+        } else if state.exact_savings_events > 0 {
             "exact".to_owned()
         } else if state.estimated_savings_events > 0 {
             "estimated".to_owned()
@@ -1155,5 +1158,26 @@ mod tests {
         let report = build_report("project", 30, &[current], &pricing).unwrap();
         assert_eq!(report.savings_confidence, "estimated");
         assert!((report.estimated_saved_cost_usd.unwrap() - 0.000015).abs() < 1e-12);
+    }
+
+    #[test]
+    fn report_marks_combined_measured_and_estimated_savings_as_mixed() {
+        let mut measured = event();
+        measured.confidence = "exact".to_owned();
+        measured.baseline_input_tokens = Some(2_000);
+        measured.saved_input_tokens = Some(1_000);
+        let mut estimated = event();
+        estimated.event_id = "estimated".to_owned();
+        estimated.kind = "mcp_pack".to_owned();
+        estimated.confidence = "estimated".to_owned();
+        estimated.input_tokens = None;
+        estimated.output_tokens = None;
+        estimated.baseline_input_tokens = Some(100);
+        estimated.ctx_tokens = Some(25);
+        estimated.saved_input_tokens = Some(75);
+        let report = build_report("global", 30, &[measured, estimated], &[]).unwrap();
+        assert_eq!(report.saved_input_tokens, Some(1_075));
+        assert_eq!(report.baseline_input_tokens, Some(2_100));
+        assert_eq!(report.savings_confidence, "mixed");
     }
 }

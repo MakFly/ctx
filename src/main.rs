@@ -1,10 +1,10 @@
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use ctx_code::briefing::generate_briefing;
 use ctx_code::cache::CacheStore;
 use ctx_code::config::{ctx_dir, default_config_text, find_ctx, load_config, repo_root};
@@ -25,15 +25,18 @@ use serde_json::{Value, json};
 #[command(
     name = "ctx",
     version,
-    about = "Explore codebases locally with bounded evidence."
+    about = "Explore codebases locally with bounded evidence.",
+    after_help = "Run ctx gain to see the usage dashboard."
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Show the usage dashboard (global by default).
+    Gain(MetricsReportArgs),
     /// Create local ctx configuration.
     Init,
     /// Index a repository into SQLite.
@@ -254,16 +257,7 @@ enum MetricsCommand {
         json: bool,
     },
     /// Aggregate metrics for the current project or all projects.
-    Report {
-        #[arg(long)]
-        global: bool,
-        #[arg(long, conflicts_with = "global")]
-        project: bool,
-        #[arg(long, default_value_t = 30)]
-        since_days: u64,
-        #[arg(long)]
-        json: bool,
-    },
+    Report(MetricsReportArgs),
     /// Export raw metric events as JSON.
     Export {
         #[arg(long)]
@@ -329,6 +323,22 @@ enum MetricsPricingCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Debug, Args)]
+struct MetricsReportArgs {
+    /// Include all projects (the default).
+    #[arg(long)]
+    global: bool,
+    /// Read metrics from the current project's CTX_DIR.
+    #[arg(long, conflicts_with = "global")]
+    project: bool,
+    /// Number of recent days to include.
+    #[arg(long, default_value_t = 30)]
+    since_days: u64,
+    /// Return structured data without terminal formatting.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -614,7 +624,13 @@ async fn main() {
 }
 
 async fn execute(cli: Cli) -> Result<()> {
-    match cli.command {
+    let Some(command) = cli.command else {
+        Cli::command().print_help()?;
+        println!();
+        return Ok(());
+    };
+    match command {
+        Command::Gain(arguments) => execute_metrics_report(arguments),
         Command::Init => init(),
         Command::Index { path, watch, force } => {
             if watch {
@@ -901,21 +917,7 @@ fn execute_metrics(command: MetricsCommand) -> Result<()> {
             let root = std::env::current_dir()?;
             emit(&ctx_code::metrics::status(&root, global)?, json)
         }
-        MetricsCommand::Report {
-            global: _,
-            project,
-            since_days,
-            json,
-        } => {
-            let root = std::env::current_dir()?;
-            let global = !project;
-            let report = ctx_code::metrics::report(&root, global, since_days)?;
-            if json {
-                return emit(&report, true);
-            }
-            print_metrics_dashboard(&report);
-            Ok(())
-        }
+        MetricsCommand::Report(arguments) => execute_metrics_report(arguments),
         MetricsCommand::Export {
             global,
             since_days,
@@ -998,7 +1000,24 @@ fn execute_metrics(command: MetricsCommand) -> Result<()> {
     }
 }
 
-fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport) {
+fn execute_metrics_report(arguments: MetricsReportArgs) -> Result<()> {
+    let root = std::env::current_dir()?;
+    let global = arguments.global || !arguments.project;
+    let report = ctx_code::metrics::report(&root, global, arguments.since_days)?;
+    if arguments.json {
+        return emit(&report, true);
+    }
+    let directory = if global {
+        ctx_code::config::global_metrics_dir()
+    } else {
+        ctx_dir(&root)
+    };
+    let database = root.join(directory).join("metrics.sqlite");
+    print_metrics_dashboard(&report, &database);
+    Ok(())
+}
+
+fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport, database: &Path) {
     let scope = if report.scope == "global" {
         "Global Scope"
     } else {
@@ -1016,6 +1035,33 @@ fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport) {
         )
     );
     println!();
+    print_metric("Period", format!("Last {} days", report.since_days), 36);
+    println!("Metrics file: {}", database.display());
+    println!();
+
+    if report.events == 0 {
+        println!(
+            "{}",
+            ctx_code::terminal::stdout(
+                format!("No usage recorded in the last {} days.", report.since_days),
+                33
+            )
+        );
+        if database.is_file() {
+            println!("The metrics file exists, but this period contains no events.");
+            println!("Try a longer period: ctx gain --since-days 90");
+        } else {
+            println!("No metrics file exists at the path above.");
+        }
+        println!("Usage is recorded by agent MCP calls, ctx run, and installed hooks.");
+        println!("Standalone ctx search/pack commands do not record usage metrics.");
+        if report.scope == "project" {
+            println!("Check CTX_DIR if your agent uses a different index directory.");
+            println!("Use ctx gain --global to see metrics across projects.");
+        }
+        print_dashboard_help();
+        return;
+    }
 
     let commands = report.mcp_calls + report.run_calls;
     let average_ms = if commands == 0 {
@@ -1023,10 +1069,20 @@ fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport) {
     } else {
         report.total_duration_ms / commands
     };
-    print_metric("Total commands", format_count(commands), 36);
-    print_metric("Input tokens", format_count(report.input_tokens), 36);
-    print_metric("Context tokens", format_count(report.ctx_tokens), 36);
-    print_metric("Output tokens", format_count(report.output_tokens), 36);
+    print_metric("Total commands", commands.to_string(), 36);
+    print_metric(
+        "Provider input tokens",
+        format_count(report.input_tokens),
+        36,
+    );
+    print_metric("Context tokens (est.)", format_count(report.ctx_tokens), 36);
+    print_metric(
+        "Provider output tokens",
+        format_count(report.output_tokens),
+        36,
+    );
+    let estimated = matches!(report.savings_confidence.as_str(), "estimated" | "mixed");
+    let savings_color = if estimated { 33 } else { 32 };
     match (report.saved_input_tokens, report.baseline_input_tokens) {
         (Some(saved), Some(baseline)) if baseline > 0 => {
             let percent = saved as f64 * 100.0 / baseline as f64;
@@ -1036,11 +1092,21 @@ fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport) {
                 format!(", {}", report.savings_confidence)
             };
             print_metric(
-                "Tokens saved",
+                if report.savings_confidence == "mixed" {
+                    "Tokens saved (mixed)"
+                } else if estimated {
+                    "Est. tokens saved"
+                } else {
+                    "Tokens saved"
+                },
                 format!("{} ({percent:.1}%{confidence})", format_count(saved)),
-                32,
+                savings_color,
             );
-            print_metric("Efficiency meter", efficiency_meter(Some(percent)), 32);
+            print_metric(
+                "Efficiency meter",
+                efficiency_meter(Some(percent)),
+                savings_color,
+            );
         }
         _ => {
             print_metric("Tokens saved", "n/a (baseline unavailable)".to_owned(), 33);
@@ -1064,33 +1130,33 @@ fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport) {
         print_metric("Estimated saved cost", format!("{cost:.6} USD"), 32);
     }
     if report.cache_hits > 0 {
-        print_metric("Cache hits", format_count(report.cache_hits), 32);
+        print_metric("Cache hits", report.cache_hits.to_string(), 32);
     }
 
     println!();
+    println!("Provider totals include only usage reported by the harness.");
+    if report.savings_confidence == "mixed" {
+        println!("This total combines paired measurements and estimates.");
+    }
+    if estimated {
+        println!("Estimated savings compare cited source files with returned context.");
+        println!("They are not a measured reduction in model usage or billing.");
+    } else if report.savings_confidence == "exact" {
+        println!("Savings use recorded provider usage and a paired no-ctx baseline.");
+    }
+    println!();
     println!("{}", ctx_code::terminal::stdout("By Operation", 32));
+    let rule = ctx_code::terminal::stdout("-".repeat(71), 32);
+    println!("{rule}");
     println!(
-        "{}",
-        ctx_code::terminal::stdout(
-            "--------------------------------------------------------------------------------",
-            32
-        )
-    );
-    println!(
-        "{:<4} {:<22} {:>8} {:>12} {:>8} {:>10} {}",
+        "{:<3} {:<16} {:>8} {:>10} {:>7} {:>9} {:<12}",
         "#", "Operation", "Count", "Saved", "Avg%", "Time", "Impact"
     );
-    println!(
-        "{}",
-        ctx_code::terminal::stdout(
-            "--------------------------------------------------------------------------------",
-            32
-        )
-    );
+    println!("{rule}");
     if report.by_operation.is_empty() {
         println!(
             "{}",
-            ctx_code::terminal::stdout("No operations recorded yet.", 33)
+            ctx_code::terminal::stdout("No MCP or ctx run calls recorded in this period.", 33)
         );
     } else {
         for (index, operation) in report.by_operation.iter().enumerate() {
@@ -1116,27 +1182,21 @@ fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport) {
                 37
             };
             println!(
-                "{:<4} {} {:>8} {:>12} {:>8} {:>10} {}",
+                "{:<3} {} {:>8} {:>10} {:>7} {:>9} {}",
                 format!("{}.", index + 1),
-                ctx_code::terminal::stdout(format!("{name:<22}"), name_color),
-                format_count(operation.events),
+                ctx_code::terminal::stdout(format!("{name:<16}"), name_color),
+                operation.events,
                 saved,
                 average,
                 format_duration(operation.duration_ms),
                 ctx_code::terminal::stdout(
-                    impact_bar(impact, 12),
+                    impact_bar(impact, 10),
                     if impact.is_some() { 36 } else { 33 }
                 )
             );
         }
     }
-    println!(
-        "{}",
-        ctx_code::terminal::stdout(
-            "--------------------------------------------------------------------------------",
-            32
-        )
-    );
+    println!("{rule}");
     if report.scope == "global" && !report.by_project.is_empty() {
         println!(
             "{}",
@@ -1146,12 +1206,19 @@ fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport) {
             )
         );
     }
+    print_dashboard_help();
+}
+
+fn print_dashboard_help() {
+    println!();
+    println!("Views: ctx gain --project | ctx gain --since-days 7 | ctx gain --json");
+    println!("Help:  ctx --help");
 }
 
 fn print_metric(label: &str, value: String, value_color: u8) {
     println!(
-        "{:<24} {}",
-        ctx_code::terminal::stdout(format!("{label}:"), 36),
+        "{} {}",
+        ctx_code::terminal::stdout(format!("{:<24}", format!("{label}:")), 36),
         ctx_code::terminal::stdout(value, value_color)
     );
 }

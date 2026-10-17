@@ -3,6 +3,17 @@
 `CLAUDE.md` is the canonical project instruction file. `AGENTS.md` points to it;
 keep this direction and do not replace this file with a symlink to `AGENTS.md`.
 
+## Local binary installation
+
+The user has given standing authorization to compile, run relevant Rust tests,
+and reinstall ctx after completing changes that affect the executable. This
+authorization supersedes per-message compilation restrictions for this workflow;
+do not ask for it again. Run the appropriate targeted checks, then install with
+`cargo install --path . --root /home/kev/.local --locked --force`.
+Verify the installed `/home/kev/.local/bin/ctx` and the affected commands before
+reporting completion. Preserve existing user-owned agent and MCP sessions.
+This local installation policy does not authorize publication or releases.
+
 ## Versioning and releases
 
 Use Semantic Versioning for project releases: bump PATCH for backward-compatible

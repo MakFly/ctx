@@ -1,30 +1,78 @@
 ---
 name: ctx-explore
-description: Explore rapidement un dépôt avec le MCP ctx avant toute recherche large ou modification d'une zone inconnue.
+description: Set up, use, and troubleshoot ctx local code search across Claude Code, Codex, Grok, OpenCode, and Cursor. Use for ctx installation or updates, repository indexing, cited code research, MCP connection problems, and ctx usage metrics.
 ---
 
-# ctx-explore
+# ctx: setup, code research, and usage
 
-Utilise d'abord les tools du serveur MCP `ctx`. Selon le harness, leur nom peut être
-préfixé par le nom du serveur, par exemple `ctx__ctx_pack` ou
-`mcp__ctx__ctx_pack`.
+Make the requested repository searchable and return enough cited evidence to
+answer the user's question. Use the current agent and the existing ctx route;
+the skill does not require a second model session or delegated explorer.
 
-1. Si `.ctx/briefing.md` correspond au besoin, lis-le et ne relance pas l'exploration.
-2. Sinon, appelle `ctx_pack` avec la question et un budget de 800 tokens.
-3. Si les faits demandés sont présents dans les hits, réponds. N'appelle
-   pas un autre tool pour confirmer les mêmes faits.
-4. Si un fait demandé manque, exécute le `hint` (un autre `ctx_pack`, souvent un
-   `expand path:start-end`). Si le harness expose `ctx_graph`, tu peux l'utiliser
-   pour un fait de graphe absent. Si le harness n'expose que `ctx_pack`, relance
-   `ctx_pack` avec le hint, ou la commande ciblée `ctx graph ... --json`.
-5. Utilise `ctx_search` pour une recherche ponctuelle et `ctx_file` pour localiser un path.
-6. Si l'index est absent ou stale, exécute `ctx index .`, puis reprends via MCP.
-7. Si un fait reste absent, vérifie `ctx lsp status --json`. Si le LSP est déjà
-   disponible, lance `ctx lsp enrich --language <langage> --background`; ne télécharge
-   jamais un LSP sans demande explicite de l'utilisateur.
-8. Si le MCP n'est pas disponible, utilise les commandes CLI équivalentes avec `--json`.
-9. Ne lance aucun Grep/Glob large tant que `coverage` n'est pas `text_only`.
-   N'invente pas de Grep pour un fait manquant : exécute le hint.
-10. Lis uniquement les spans `start`-`end` cités; ne dumpe jamais un fichier entier.
-11. Rapporte `coverage` et `hint`, et cite chaque conclusion avec un `path:line` issu de ctx.
-12. N'invente aucun fichier absent des hits ou de la carte.
+## Choose the requested work
+
+- **Install, connect, update, or repair:** read [setup.md](references/setup.md).
+  Distinguish installing the binary from configuring a project and making this
+  skill discoverable. Verify the affected commands and configuration.
+- **Find or understand code:** use an available ctx MCP tool, or
+  `konoha_code_context` when that is the established project integration.
+  Read [retrieval.md](references/retrieval.md) when choosing a search mode,
+  handling incomplete results, or investigating freshness.
+- **Explain usage or savings:** use `ctx gain`; the metrics section of
+  [retrieval.md](references/retrieval.md) explains scope, missing data, and
+  the difference between estimates and a measured comparison.
+
+## Repository and transport
+
+Establish the repository root from the user's request and actual working
+directory. Inspect the effective `CTX_DIR` before interpreting status or
+changing an index. A repository's `.ctx/` and a KonohaOS-managed index can be
+different stores for the same code.
+
+Prefer the existing working integration. When KonohaOS already provides code
+context, reuse it; do not add another direct MCP server or create a second index
+merely to answer a code question. Resolve redirected paths from configuration
+or the running ctx process, never by guessing a workspace hash.
+
+Tool names can have harness prefixes. Inspect their actual schemas: compact
+Codex/Grok integrations expose a query-only `ctx_pack`; full integrations also
+expose search, graph, and file tools. Use the supported arguments, with CLI
+`--json` as a fallback when it can access the same effective index.
+
+## Evidence quality
+
+Start with an exact symbol when one is known, or a focused subsystem question.
+Use an existing briefing only when it is relevant and current. A pack may
+contain signatures and relationships rather than complete function bodies.
+Expand the cited span when the requested fact requires the body.
+
+Answer when the evidence is sufficient. For a missing fact, use a relevant
+expansion hint or a narrower query; do not repeat an empty or unchanged hint
+indefinitely. If ctx is unavailable or still lacks the evidence, use targeted
+file reads or native search within the user's permissions. Missing hits and
+`coverage=partial` do not establish that a file, symbol, or relationship is absent.
+
+Cite `path:line` references from inspected evidence. Read the affected source
+before editing it. Report material coverage or freshness limits without turning
+every response into a tool transcript.
+
+## Boundaries and completion
+
+Honor the requested scope and existing authorization. An installation request
+permits the relevant local setup; a code question does not automatically permit
+installing binaries, changing harness settings, downloading language servers,
+or launching an external agent. In a read-only explorer, report required setup
+to the caller. Do not use `ctx run` for ordinary code retrieval.
+
+Do not manually index over an active writer, kill user sessions to acquire a
+lock, or delete an index as a routine repair. Follow the freshness guidance in
+the reference. Embeddings are currently disabled; they are not a setup dependency.
+
+For setup, verify the selected integration and retrieve a known source symbol
+when possible. Distinguish files installed, discovery confirmed, and an actual
+successful MCP call. A skill may require a new session or a harness refresh to
+appear. Never claim a runtime check, benchmark, build, or restart that did not run.
+
+For ctx development, follow its repository's installation policy after changing
+the executable or embedded skill assets. Existing project copies are refreshed
+with `ctx update`; updating the binary alone does not rewrite them.

@@ -12,6 +12,12 @@ their inline tests. The package manifest is local to ctx and participates in the
 root Cargo workspace, so upstream tests are included by `cargo test --workspace`. It is not a standalone
 installation of the tgrep executable, and it does not run its TCP server.
 
+The ctx-explore skill and MCP instruction refresh on 2026-10-17 changes harness
+guidance and skill packaging only. It changes no vendored code, search algorithm,
+upstream revision, or index format; see the maintenance memory for details.
+All five harness installation tests and both MCP transport tests passed for
+this instruction/packaging change. No search performance benchmark was run.
+
 ## Integration changes
 
 - `query.rs` retains OR subplans within concatenations using `QueryPlan::All`.

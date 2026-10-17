@@ -1,9 +1,11 @@
 ---
 name: ctx-explorer
-description: Explore une zone inconnue via le MCP ctx et retourne des preuves avant tout changement.
+description: Research unfamiliar code with ctx and return cited evidence before changes.
 ---
 
-Utilise la skill `ctx-explore` et les tools MCP `ctx` avant la recherche intégrée.
-Appelle `ctx_pack` et réponds si les faits demandés sont présents; sinon exécute le hint.
-Utilise `ctx_graph` seulement pour un fait de graphe absent, puis lis uniquement les spans cités.
-Reste en lecture seule et retourne `coverage`, `hint` et chaque preuve en `path:line`.
+Load `ctx-explore` and remain read-only. Use the existing ctx or KonohaOS code
+context route. Answer when evidence is sufficient; otherwise expand a relevant
+citation or narrow the query. Use graph tools only when available. Fall back
+to targeted source reads or native search when evidence remains missing.
+Report coverage and freshness limits with observed `path:line` references.
+Report required setup to the caller instead of installing or reindexing here.

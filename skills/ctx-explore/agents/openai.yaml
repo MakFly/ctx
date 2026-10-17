@@ -1,10 +1,7 @@
 interface:
-  display_name: "ctx explorer"
-  short_description: "Explore un dépôt via le MCP ctx"
-  default_prompt: "Utilise ctx pour cartographier ce sujet et retourne des preuves path:line bornées."
+  display_name: "ctx setup and research"
+  short_description: "Install ctx, research code, and inspect usage"
+  default_prompt: "Use $ctx-explore to set up ctx or investigate this repository with cited code evidence."
 
-dependencies:
-  tools:
-    - type: "mcp"
-      value: "ctx"
-      description: "Serveur MCP local ctx"
+policy:
+  allow_implicit_invocation: true

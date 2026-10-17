@@ -3,6 +3,7 @@ use std::path::Path;
 
 use ctx_code::harness::{install, installation_plan};
 use serde_json::Value;
+use walkdir::WalkDir;
 
 #[test]
 fn install_preserves_unreadable_text_configurations() {
@@ -55,6 +56,54 @@ fn install_does_not_create_gitignore_when_missing() {
     install(project.path(), "grok", "install").unwrap();
     assert!(project.path().join(".grok/config.toml").is_file());
     assert!(!project.path().join(".gitignore").exists());
+}
+
+#[test]
+fn every_harness_receives_the_complete_skill_bundle_and_update() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/ctx-explore");
+    for (target, directory) in [
+        ("claude", ".claude/skills/ctx-explore"),
+        ("codex", ".agents/skills/ctx-explore"),
+        ("grok", ".grok/skills/ctx-explore"),
+        ("opencode", ".opencode/skills/ctx-explore"),
+        ("cursor", ".cursor/skills/ctx-explore"),
+    ] {
+        let project = tempfile::tempdir().unwrap();
+        let root = project.path();
+        let plan = installation_plan(root, target, "install", Some(""), Some(root)).unwrap();
+        let installed = install(root, target, "install").unwrap();
+        let mut planned = plan
+            .files
+            .iter()
+            .map(|path| root.join(path))
+            .collect::<Vec<_>>();
+        let mut actual = installed.clone();
+        planned.sort();
+        actual.sort();
+        assert_eq!(planned, actual, "incomplete dry-run plan for {target}");
+        for entry in WalkDir::new(&source).into_iter().map(Result::unwrap) {
+            if entry.file_type().is_file() {
+                let destination = root
+                    .join(directory)
+                    .join(entry.path().strip_prefix(&source).unwrap());
+                assert!(
+                    installed.contains(&destination),
+                    "unreported skill file for {target}"
+                );
+                assert_eq!(
+                    fs::read(&destination).unwrap(),
+                    fs::read(entry.path()).unwrap()
+                );
+            }
+        }
+        let reference = root.join(directory).join("references/setup.md");
+        fs::write(&reference, "stale reference\n").unwrap();
+        install(root, target, "update").unwrap();
+        assert_eq!(
+            fs::read(reference).unwrap(),
+            fs::read(source.join("references/setup.md")).unwrap()
+        );
+    }
 }
 
 #[test]

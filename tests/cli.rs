@@ -26,6 +26,139 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     (temporary, root)
 }
 
+fn metrics_cli(root: &Path) -> Command {
+    let mut command = Command::cargo_bin("ctx").unwrap();
+    command
+        .current_dir(root)
+        .env("CTX_DIR", root.join("index"))
+        .env("CTX_GLOBAL_METRICS_DIR", root.join("global"))
+        .env("NO_COLOR", "1");
+    command
+}
+
+#[test]
+fn dashboard_entrypoints_explain_missing_metrics_without_creating_an_index() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let help = metrics_cli(root).output().unwrap();
+    assert!(help.status.success());
+    assert!(help.stderr.is_empty());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("Usage:"));
+    assert!(help.contains("Commands:"));
+    assert!(help.contains("gain"));
+    assert!(!help.contains("CTX Token Savings"));
+    assert!(!root.join("index").exists());
+    assert!(!root.join("global").exists());
+    let mut previous = None;
+    for arguments in [vec!["gain"], vec!["metrics", "report"]] {
+        let output = metrics_cli(root).args(arguments).output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("CTX Token Savings (Global Scope)"));
+        assert!(text.contains("No usage recorded in the last 30 days."));
+        assert!(text.contains("No metrics file exists at the path above."));
+        assert!(text.contains(&root.join("global/metrics.sqlite").display().to_string()));
+        assert!(text.contains("ctx --help"));
+        assert!(!text.contains('\x1b'));
+        if let Some(previous) = &previous {
+            assert_eq!(&text, previous);
+        }
+        previous = Some(text);
+    }
+    assert!(!root.join("index").exists());
+    assert!(!root.join("global").exists());
+    metrics_cli(root)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Usage:"));
+}
+
+#[test]
+fn gain_reports_recorded_events_and_preserves_metrics_json() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::create_dir(root.join("index")).unwrap();
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let event = serde_json::json!({
+        "event_id": "dashboard-fixture",
+        "created_at": created_at,
+        "project_id": "dashboard-project",
+        "project_name": "dashboard-fixture",
+        "kind": "mcp_pack",
+        "harness": "mcp",
+        "model": "",
+        "confidence": "estimated",
+        "ctx_tokens": 64,
+        "baseline_input_tokens": 256,
+        "saved_input_tokens": 192,
+        "duration_ms": 20,
+        "cache_hit": false,
+        "tool_calls": 1
+    });
+    fs::write(root.join("index/metrics.queue"), format!("{event}\n")).unwrap();
+    metrics_cli(root)
+        .args(["metrics", "drain", "--root"])
+        .arg(root)
+        .assert()
+        .success();
+
+    let output = metrics_cli(root).arg("gain").output().unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Last 30 days"));
+    assert!(text.contains("Total commands:          1\n"));
+    assert!(text.contains("Est. tokens saved:       192 (75.0%, estimated)"));
+    assert!(text.contains("ctx_pack"));
+    assert!(text.contains("not a measured reduction in model usage or billing"));
+
+    let mut previous = None;
+    for arguments in [
+        vec!["gain", "--global", "--since-days", "7", "--json"],
+        vec!["metrics", "report", "--since-days", "7", "--json"],
+    ] {
+        let output = metrics_cli(root).args(arguments).output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["scope"], "global");
+        assert_eq!(value["since_days"], 7);
+        assert_eq!(value["mcp_calls"], 1);
+        assert_eq!(value["ctx_tokens"], 64);
+        assert_eq!(value["saved_input_tokens"], 192);
+        if let Some(previous) = &previous {
+            assert_eq!(&value, previous);
+        }
+        previous = Some(value);
+    }
+}
+
+#[test]
+fn gain_project_view_identifies_its_metrics_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let output = metrics_cli(root)
+        .args(["gain", "--project", "--since-days", "7"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Project Scope"));
+    assert!(text.contains("No usage recorded in the last 7 days."));
+    assert!(text.contains(&root.join("index/metrics.sqlite").display().to_string()));
+    assert!(text.contains("Check CTX_DIR"));
+    assert!(text.contains("ctx gain --global"));
+    metrics_cli(root)
+        .args(["gain", "--project", "--global"])
+        .assert()
+        .failure();
+}
+
 #[test]
 fn cli_indexes_and_searches_with_json_envelope() {
     let (_temporary, root) = fixture();

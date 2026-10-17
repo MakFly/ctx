@@ -87,6 +87,19 @@ skills and agents, and adds `.ctx/` to an existing `.gitignore` without creating
 one when the project does not have it. Codex project trust remains a
 user-controlled setting.
 
+All five targets receive the same `ctx-explore` skill, including its setup and
+retrieval references. It covers binary/project installation, code research,
+index freshness, MCP diagnostics and usage metrics. It reuses an existing
+KonohaOS code-context route when available and explains how to inspect the
+same external `CTX_DIR` from the CLI. The optional explorer agents remain
+read-only; the main session handles authorized setup.
+
+Invoke `/ctx-explore` in Claude Code or Grok, or select `$ctx-explore` in Codex.
+For example: "Use ctx-explore to connect ctx to this project", "Find the callers
+of login with ctx-explore", or "Use ctx-explore to explain why ctx gain is empty".
+`ctx update --target <harness>` refreshes existing project skill copies after
+updating the binary. See the [skill](skills/ctx-explore/SKILL.md) for its scope.
+
 Project configuration files are `.mcp.json` for Claude Code, `.codex/config.toml`
 for Codex, `.grok/config.toml` for Grok, `opencode.json` for OpenCode, and
 `.cursor/mcp.json` for Cursor.
@@ -187,10 +200,16 @@ fail rather than silently broadening tool access.
 Metric events are queued under .ctx/metrics.queue and aggregated by a
 detached worker, so MCP calls, hooks and ctx run do not wait for SQLite
 aggregation. Project events are stored in .ctx/metrics.sqlite; global events
-are stored in ~/.ctx/metrics.sqlite or the directory selected by
-CTX_GLOBAL_METRICS_DIR. Query hashes are stored instead of source questions.
+are stored in `CTX_GLOBAL_METRICS_DIR`, `$XDG_STATE_HOME/ctx`, or `~/.ctx`
+(in that order of precedence). `CTX_DIR` selects the project metrics directory
+alongside its index. Query hashes are stored instead of source questions.
 
 ~~~console
+ctx
+ctx gain
+ctx gain --since-days 7
+ctx gain --project
+ctx gain --json
 ctx metrics status --json
 ctx metrics report --since-days 30
 ctx metrics report --project --since-days 30
@@ -198,13 +217,30 @@ ctx metrics report --global --json
 ctx metrics export --since-days 30 --output .ctx/metrics-export.json
 ~~~
 
-ctx metrics report shows the global dashboard by default. Use
---project for the current repository. It distinguishes provider usage from ctx
-evidence tokens.
+`ctx` without arguments and `ctx --help` list the available commands.
+`ctx gain` and `ctx metrics report` show the same global dashboard for the
+last 30 days. Use `--project` with `gain` or `metrics report` for the current
+repository.
+The dashboard shows the reporting period, metrics file, exact call counts,
+estimated context tokens, provider usage, and an ASCII efficiency meter.
+Colors are enabled in terminals unless `NO_COLOR` is set; piped output and
+`--json` remain uncolored. For a single colored terminal invocation when
+`NO_COLOR` is set, use `env -u NO_COLOR ctx gain`.
+
+An empty dashboard explains which metrics file was checked and how usage is
+recorded. Agent MCP calls, `ctx run`, and installed lifecycle hooks record
+metrics; standalone CLI `search` and `pack` commands do not. If an agent uses
+an external `CTX_DIR`, set that same directory for `ctx gain --project`, or
+use the global dashboard. Queued events appear after background aggregation.
+
 Provider usage is exact when the harness returns usage data. Savings remain
 exact when a comparable no-ctx baseline is recorded. MCP evidence calls also
 show estimated savings when ctx can estimate the source files represented by
-the returned evidence. Configure model pricing when needed:
+the returned evidence. The dashboard labels these estimates explicitly:
+they do not measure a reduction in provider usage or billing.
+Totals combining paired measurements and estimates are labeled `mixed`,
+including the JSON report's `savings_confidence` field.
+Configure model pricing when needed:
 
 ~~~console
 ctx metrics pricing set \

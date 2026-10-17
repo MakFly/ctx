@@ -1,9 +1,12 @@
 ---
 name: ctx-explorer
-description: Explore une codebase en lecture seule via le MCP ctx avant un changement.
+description: Research a codebase read-only with ctx before a change.
 mode: subagent
 ---
 
-Charge la skill `ctx-explore`. Appelle `ctx_pack` et réponds si les faits
-demandés sont présents; sinon exécute le hint. Utilise `ctx_graph` seulement pour un fait de graphe absent. Ne modifie
-aucun fichier. Retourne `coverage`, `hint` et des citations `path:line` vérifiables.
+Load `ctx-explore` and remain read-only. Use the existing ctx or KonohaOS code
+context route. Answer when evidence is sufficient; otherwise expand a relevant
+citation or narrow the query. Use graph tools only when available. Fall back
+to targeted source reads or native search when evidence remains missing.
+Report coverage and freshness limits with observed `path:line` references.
+Report required setup to the caller instead of installing or reindexing here.

@@ -14,6 +14,18 @@ const END: &str = "<!-- ctx-explore:end -->";
 const TARGETS: &[&str] = &["claude", "codex", "cursor", "grok", "opencode"];
 const SKILL: &str = include_str!("../skills/ctx-explore/SKILL.md");
 const OPENAI_SKILL: &str = include_str!("../skills/ctx-explore/agents/openai.yaml");
+const SKILL_FILES: &[(&str, &str)] = &[
+    ("SKILL.md", SKILL),
+    ("agents/openai.yaml", OPENAI_SKILL),
+    (
+        "references/setup.md",
+        include_str!("../skills/ctx-explore/references/setup.md"),
+    ),
+    (
+        "references/retrieval.md",
+        include_str!("../skills/ctx-explore/references/retrieval.md"),
+    ),
+];
 const AGENTS_SNIPPET: &str = include_str!("../skills/AGENTS.snippet.md");
 const CLAUDE_SNIPPET: &str = include_str!("../skills/CLAUDE.snippet.md");
 const CLAUDE_AGENT: &str = include_str!("../agents/claude/ctx-explorer.md");
@@ -136,15 +148,17 @@ pub fn install(root: &Path, target: &str, mode: &str) -> Result<Vec<PathBuf>> {
     }
     ensure_ctx_gitignore(root)?;
     let mut installed = Vec::new();
+    for target in &selected {
+        if let Some(directory) = skill_directory(target) {
+            installed.extend(copy_skill(&root.join(directory))?);
+        }
+    }
     if selected.contains("claude") {
-        let skill = root.join(".claude/skills/ctx-explore");
-        copy_skill(&skill)?;
         write(root.join(".claude/agents/ctx-explorer.md"), CLAUDE_AGENT)?;
         install_json_mcp(&root.join(".mcp.json"))?;
         install_claude_metrics_hooks(&root.join(".claude/settings.json"))?;
         append_once(&root.join("CLAUDE.md"), CLAUDE_SNIPPET)?;
         installed.extend([
-            skill.join("SKILL.md"),
             root.join(".claude/agents/ctx-explorer.md"),
             root.join(".mcp.json"),
             root.join(".claude/settings.json"),
@@ -152,13 +166,10 @@ pub fn install(root: &Path, target: &str, mode: &str) -> Result<Vec<PathBuf>> {
         ]);
     }
     if selected.contains("codex") {
-        let skill = root.join(".agents/skills/ctx-explore");
-        copy_skill(&skill)?;
         write(root.join(".codex/agents/ctx-explorer.toml"), CODEX_AGENT)?;
         install_codex_mcp(&root.join(".codex/config.toml"))?;
         append_once(&root.join("AGENTS.md"), AGENTS_SNIPPET)?;
         installed.extend([
-            skill.join("SKILL.md"),
             root.join(".codex/agents/ctx-explorer.toml"),
             root.join(".codex/config.toml"),
             root.join("AGENTS.md"),
@@ -171,27 +182,21 @@ pub fn install(root: &Path, target: &str, mode: &str) -> Result<Vec<PathBuf>> {
         installed.extend([config, root.join("AGENTS.md")]);
     }
     if selected.contains("opencode") {
-        let skill = root.join(".opencode/skills/ctx-explore");
-        copy_skill(&skill)?;
         write(
             root.join(".opencode/agents/ctx-explorer.md"),
             OPENCODE_AGENT,
         )?;
         install_opencode_mcp(&root.join("opencode.json"))?;
         installed.extend([
-            skill.join("SKILL.md"),
             root.join(".opencode/agents/ctx-explorer.md"),
             root.join("opencode.json"),
         ]);
     }
     if selected.contains("cursor") {
-        let skill = root.join(".cursor/skills/ctx-explore");
-        copy_skill(&skill)?;
         write(root.join(".cursor/agents/ctx-explorer.md"), CURSOR_AGENT)?;
         install_json_mcp(&root.join(".cursor/mcp.json"))?;
         install_cursor_metrics_hooks(&root.join(".cursor/hooks.json"))?;
         installed.extend([
-            skill.join("SKILL.md"),
             root.join(".cursor/agents/ctx-explorer.md"),
             root.join(".cursor/mcp.json"),
             root.join(".cursor/hooks.json"),
@@ -229,7 +234,6 @@ fn planned_paths(selected: &BTreeSet<String>) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if selected.contains("claude") {
         paths.extend([
-            ".claude/skills/ctx-explore/SKILL.md",
             ".claude/agents/ctx-explorer.md",
             ".mcp.json",
             ".claude/settings.json",
@@ -238,7 +242,6 @@ fn planned_paths(selected: &BTreeSet<String>) -> Vec<PathBuf> {
     }
     if selected.contains("codex") {
         paths.extend([
-            ".agents/skills/ctx-explore/SKILL.md",
             ".codex/agents/ctx-explorer.toml",
             ".codex/config.toml",
             "AGENTS.md",
@@ -248,15 +251,10 @@ fn planned_paths(selected: &BTreeSet<String>) -> Vec<PathBuf> {
         paths.extend([".grok/config.toml", "AGENTS.md"]);
     }
     if selected.contains("opencode") {
-        paths.extend([
-            ".opencode/skills/ctx-explore/SKILL.md",
-            ".opencode/agents/ctx-explorer.md",
-            "opencode.json",
-        ]);
+        paths.extend([".opencode/agents/ctx-explorer.md", "opencode.json"]);
     }
     if selected.contains("cursor") {
         paths.extend([
-            ".cursor/skills/ctx-explore/SKILL.md",
             ".cursor/agents/ctx-explorer.md",
             ".cursor/mcp.json",
             ".cursor/hooks.json",
@@ -269,12 +267,37 @@ fn planned_paths(selected: &BTreeSet<String>) -> Vec<PathBuf> {
             unique.push(path);
         }
     }
+    for target in selected {
+        if let Some(directory) = skill_directory(target) {
+            unique.extend(
+                SKILL_FILES
+                    .iter()
+                    .map(|(relative, _)| Path::new(directory).join(relative)),
+            );
+        }
+    }
     unique
 }
 
-fn copy_skill(destination: &Path) -> Result<()> {
-    write(destination.join("SKILL.md"), SKILL)?;
-    write(destination.join("agents/openai.yaml"), OPENAI_SKILL)
+fn skill_directory(target: &str) -> Option<&'static str> {
+    match target {
+        "claude" => Some(".claude/skills/ctx-explore"),
+        "codex" => Some(".agents/skills/ctx-explore"),
+        "grok" => Some(".grok/skills/ctx-explore"),
+        "opencode" => Some(".opencode/skills/ctx-explore"),
+        "cursor" => Some(".cursor/skills/ctx-explore"),
+        _ => None,
+    }
+}
+
+fn copy_skill(destination: &Path) -> Result<Vec<PathBuf>> {
+    let mut written = Vec::new();
+    for (relative, content) in SKILL_FILES {
+        let path = destination.join(relative);
+        write(path.clone(), content)?;
+        written.push(path);
+    }
+    Ok(written)
 }
 
 fn append_once(path: &Path, snippet: &str) -> Result<()> {

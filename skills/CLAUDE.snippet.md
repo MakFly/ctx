@@ -1,11 +1,10 @@
-## Exploration avec ctx
-Le serveur MCP `ctx` et la skill `ctx-explore` sont la voie d'exploration par défaut.
-Lis `.ctx/briefing.md` s'il répond déjà au besoin.
-Préfère `ctx_pack` à Grep pour découvrir un sous-système.
-Réponds si le pack contient les faits demandés; si un fait manque, exécute le hint (un autre `ctx_pack`).
-N'invente pas de Grep tant que `coverage` n'est pas `text_only`.
-Utilise `ctx_search` pour une recherche ciblée et `ctx_file` pour un path.
-Si le MCP est indisponible, utilise les commandes `ctx ... --json` équivalentes.
-Lis ensuite uniquement les spans cités par ctx.
-Ne déduis jamais l'existence d'un fichier absent des résultats.
-Chaque conclusion structurelle doit citer un `path:line`.
+## Code research with ctx
+Use `ctx-explore` for ctx setup, code research, freshness, and usage metrics.
+Prefer the existing ctx MCP or KonohaOS code-context route for exploration;
+avoid adding a second integration or guessing an external CTX_DIR.
+Answer from sufficient evidence. Expand relevant citations or narrow the query
+when facts are missing; targeted native search is a fallback when ctx cannot
+supply them. Read cited source before editing and cite observed `path:line`.
+Partial coverage and missing hits do not establish absence.
+Do not index over an active writer or invoke another agent for retrieval.
+Bare `ctx` lists commands; `ctx gain` shows usage, including labeled estimates.

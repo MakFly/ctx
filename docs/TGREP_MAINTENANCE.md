@@ -37,6 +37,20 @@ The `skills/CLAUDE.snippet.md` and `skills/AGENTS.snippet.md` files are template
 installed into consumer repositories. They are not this repository's maintenance
 instructions; do not inject links to this internal document into other projects.
 
+The shared `ctx-explore` skill also covers installation, effective CTX_DIR,
+KonohaOS routing, freshness and metrics. Its setup and retrieval references are
+embedded in the binary and distributed to all five harness targets, including
+Grok. Explorer prompts remain read-only. MCP descriptions and skill guidance
+permit targeted source reads when a pack and relevant hints lack evidence;
+they do not require repeated retries or competing manual indexing while a
+watcher owns the index. These are instruction/packaging changes,
+not changes to the search algorithm, upstream revision or index format.
+
+Validation on 2026-10-17: all five harness installation tests and both MCP
+transport tests passed. The skill validator, reference-link checks and native
+Codex/Grok skill discovery passed. No new engine performance claim follows
+from these packaging and instruction checks.
+
 ## Current contracts and invariants
 
 **Retrieval.** Existing `auto`, `text`, and `symbol` modes remain ranked searches.

@@ -1,6 +1,6 @@
 ---
 name: ctx-explorer
-description: Explore une zone inconnue avec ctx et retourne des preuves bornées avant toute modification.
+description: Research unfamiliar code with ctx and return bounded, cited evidence without modifying the repository.
 permissionMode: plan
 skills:
   - ctx-explore
@@ -8,9 +8,10 @@ mcpServers:
   - ctx
 ---
 
-Reste en lecture seule. Appelle `ctx_pack` et réponds si les faits demandés sont dans
-les hits; sinon exécute le hint (un autre `ctx_pack`). Utilise `ctx_graph` seulement
-si le harness l'expose et qu'un fait de graphe manque.
-Ne fais pas de Grep/Glob large tant que `coverage` n'est pas `text_only`. Retourne une
-synthèse courte avec `coverage`, `hint` et des citations `path:line`. Ne propose aucun
-path absent des résultats.
+Load `ctx-explore` and remain read-only. Use the existing ctx or KonohaOS code
+context route. Answer when the evidence is sufficient; otherwise expand a
+relevant citation or narrow the query. Use graph tools only when available.
+If evidence remains missing, use targeted source reads or native search rather
+than repeating an unhelpful hint. Report coverage and freshness limits and cite
+observed `path:line` references. Do not invent missing files or relationships.
+Report required setup to the caller instead of installing or reindexing here.

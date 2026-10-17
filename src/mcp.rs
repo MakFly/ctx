@@ -158,7 +158,7 @@ impl CtxMcp {
 
     #[tool(
         name = "ctx_pack",
-        description = "Bounded code evidence pack: definitions, callers, callees, citation spans. Answer when requested facts are in the hits; otherwise run the hint (another ctx_pack). Do not Grep while coverage is not text_only.",
+        description = "Bounded code evidence pack: definitions, callers, callees, citation spans. Answer when requested facts are in the hits; otherwise follow a relevant expansion hint or narrow the query. Use targeted source reads when evidence remains missing.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -229,7 +229,7 @@ impl ServerHandler for CtxMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Use ctx_pack before broad Grep. Answer when requested facts are in the hits; otherwise run the hint. Cite path:line spans. Do not Grep while coverage is not text_only.",
+                "Use ctx_pack for code exploration. Answer when evidence is sufficient; otherwise follow a relevant hint or narrow the query. Cite path:line spans. Use targeted source reads when evidence remains missing; partial coverage does not prove absence.",
             )
     }
 }
@@ -253,7 +253,7 @@ impl CompactCtxMcp {
 impl CompactCtxMcp {
     #[tool(
         name = "ctx_pack",
-        description = "Bounded code evidence: definitions, callers, callees, citation spans. Answer when requested facts are in the hits; otherwise run the hint as another ctx_pack. Do not Grep while coverage is not text_only.",
+        description = "Bounded code evidence: definitions, callers, callees, citation spans. Answer when requested facts are in the hits; otherwise follow a relevant expansion hint or narrow the query. Use targeted source reads when evidence remains missing.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -284,7 +284,7 @@ impl ServerHandler for CompactCtxMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Call ctx_pack. Answer if requested facts are in the hits; otherwise run the hint. Cite exact path:line spans. Do not Grep while coverage is not text_only.",
+                "Call ctx_pack for code exploration. Answer when evidence is sufficient; otherwise follow a relevant hint or narrow the query. Cite exact path:line spans. Use targeted source reads when evidence remains missing; partial coverage does not prove absence.",
             )
     }
 }
