@@ -1,5 +1,4 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -10,6 +9,7 @@ use serde_json::json;
 
 use crate::config::{ctx_dir, repo_root};
 use crate::indexer::index_repository_with_options;
+use crate::spool;
 
 const REQUEST_FILE: &str = "reindex.request";
 const WORKER_LOCK: &str = "reindex.worker.lock";
@@ -23,11 +23,11 @@ pub fn request_async(root: &Path, force: bool) -> Result<()> {
     let root = repo_root(root)?;
     let directory = ctx_dir(&root);
     fs::create_dir_all(&directory)?;
-    let mut request = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(directory.join(REQUEST_FILE))?;
-    writeln!(request, "{}", json!({"force": force}))?;
+    spool::append_line(
+        &directory,
+        REQUEST_FILE,
+        json!({"force": force}).to_string().as_bytes(),
+    )?;
     spawn_worker(&root);
     Ok(())
 }
@@ -44,33 +44,29 @@ pub fn drain(root: &Path) -> Result<()> {
         return Ok(());
     }
     loop {
-        let request_path = directory.join(REQUEST_FILE);
-        if !request_path.is_file() {
+        let snapshots = spool::claim(&directory, REQUEST_FILE)?;
+        if snapshots.is_empty() {
             break;
         }
-        let snapshot = directory.join(format!(
-            "reindex.request.{}.{}",
-            std::process::id(),
-            std::process::id()
-        ));
-        if fs::rename(&request_path, &snapshot).is_err() {
-            break;
-        }
-        let force = fs::read_to_string(&snapshot)?
-            .lines()
+        let force = snapshots
+            .iter()
+            .map(fs::read_to_string)
+            .collect::<std::io::Result<Vec<_>>>()?
+            .iter()
+            .flat_map(|contents| contents.lines())
             .filter_map(|line| serde_json::from_str::<ReindexRequest>(line).ok())
             .any(|request| request.force);
-        fs::remove_file(snapshot)?;
         if crate::watcher::status(&root)["watcher"] == "active" {
+            for snapshot in snapshots {
+                fs::remove_file(snapshot)?;
+            }
             continue;
         }
         if index_repository_with_options(&root, force).is_err() {
-            let mut retry = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&request_path)?;
-            writeln!(retry, "{}", json!({"force": force}))?;
             break;
+        }
+        for snapshot in snapshots {
+            fs::remove_file(snapshot)?;
         }
     }
     let _ = lock.unlock();

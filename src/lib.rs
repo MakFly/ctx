@@ -16,6 +16,7 @@ pub mod parser;
 pub mod reindex;
 pub mod runner;
 pub mod search;
+pub(crate) mod spool;
 pub mod terminal;
 pub mod text_index;
 pub mod watcher;

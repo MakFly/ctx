@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::cache::{AgentResult, TokenUsage};
 use crate::config::{ctx_dir, global_metrics_dir, load_config, repo_root};
 use crate::model::Envelope;
+use crate::spool;
 
 const QUEUE_FILE: &str = "metrics.queue";
 const WORKER_LOCK: &str = "metrics.worker.lock";
@@ -343,11 +344,7 @@ pub fn enqueue(root: &Path, event: MetricEvent) -> Result<()> {
     let root = repo_root(root)?;
     let directory = ctx_dir(&root);
     fs::create_dir_all(&directory)?;
-    let queue = directory.join(QUEUE_FILE);
-    let mut file = OpenOptions::new().create(true).append(true).open(&queue)?;
-    serde_json::to_writer(&mut file, &event)?;
-    file.write_all(b"\n")?;
-    file.flush()?;
+    spool::append_line(&directory, QUEUE_FILE, &serde_json::to_vec(&event)?)?;
     spawn_worker(&root);
     Ok(())
 }
@@ -366,35 +363,32 @@ pub fn drain(root: &Path) -> Result<usize> {
     }
     let mut processed = 0;
     loop {
-        let queue = directory.join(QUEUE_FILE);
-        if !queue.is_file() {
+        let snapshots = spool::claim(&directory, QUEUE_FILE)?;
+        if snapshots.is_empty() {
             break;
         }
-        let snapshot = directory.join(format!(
-            "metrics.queue.{}.{}",
-            std::process::id(),
-            now_nanos()
-        ));
-        if fs::rename(&queue, &snapshot).is_err() {
-            break;
-        }
-        let file = fs::File::open(&snapshot)?;
-        let mut events = Vec::new();
-        for line in BufReader::new(file).lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
+        for snapshot in snapshots {
+            let file = fs::File::open(&snapshot)?;
+            let mut events = Vec::new();
+            for line in BufReader::new(file).lines() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                events.push(
+                    serde_json::from_str::<MetricEvent>(&line).with_context(|| {
+                        format!("invalid metrics event in {}", snapshot.display())
+                    })?,
+                );
             }
-            events.push(
-                serde_json::from_str::<MetricEvent>(&line)
-                    .with_context(|| format!("invalid metrics event in {}", snapshot.display()))?,
-            );
+            // Delivery is at-least-once because snapshots outlive per-event commits.
+            // event_id makes retries idempotent.
+            for event in &events {
+                store_event(&root, event)?;
+                processed += 1;
+            }
+            fs::remove_file(snapshot)?;
         }
-        for event in &events {
-            store_event(&root, event)?;
-            processed += 1;
-        }
-        fs::remove_file(snapshot)?;
     }
     let _ = lock.unlock();
     Ok(processed)
