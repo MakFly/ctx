@@ -790,8 +790,7 @@ pub fn post_tool_response_with(
                 .unwrap_or(file)
                 .to_string_lossy()
                 .into_owned();
-            named = content
-                .lines()
+            named = crate::compact::split_lf(content)
                 .map(|line| {
                     let digits = line.bytes().take_while(u8::is_ascii_digit).count();
                     if digits > 0 && matches!(line.as_bytes().get(digits), Some(b':' | b'-')) {
@@ -1135,6 +1134,17 @@ mod tests {
         assert!(
             content.starts_with("a.ts\n2:two\naround the matches:\n## a.ts 1-3\n"),
             "{content}"
+        );
+        // A CR before the LF stays in the line.
+        let crlf = json!({"tool_name": "Grep", "cwd": dir.path(), "tool_input": {"path": "a.ts"},
+            "tool_response": {"mode": "content", "content": "2:two\r\n3:three", "numLines": 2}});
+        let out = post_tool_response(&crlf, "claude").unwrap();
+        let content = out["hookSpecificOutput"]["updatedToolOutput"]["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            content.starts_with("a.ts\n2:two\r\n3:three\n"),
+            "{content:?}"
         );
     }
 

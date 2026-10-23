@@ -70,7 +70,7 @@ fn load(root: &Path, path: &str) -> Option<Source> {
         .map(|(symbols, _)| symbols)
         .unwrap_or_default();
     Some(Source {
-        lines: text.lines().map(str::to_owned).collect(),
+        lines: split_lf(&text).map(str::to_owned).collect(),
         symbols,
     })
 }
@@ -286,7 +286,7 @@ fn expand_definitions(
 
 /// One parsed `path:line:text` match line, or a `path-line-text` context line.
 /// Lines split on LF alone, so a CR before it stays: a name or a line keeps every byte.
-fn split_lf(input: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn split_lf(input: &str) -> impl Iterator<Item = &str> {
     input
         .strip_suffix('\n')
         .unwrap_or(input)
@@ -301,22 +301,37 @@ fn split_lf(input: &str) -> impl Iterator<Item = &str> {
 /// but for a `--` separator when context was asked; any other line is the head of a
 /// file name holding a newline, so it and the record that ends that name are shown as
 /// they are, unattributed (the record's visible path is only the name's tail).
-fn null_records(input: &str, context_separators: bool) -> Vec<(&str, bool)> {
+fn null_records<'a>(
+    input: &'a str,
+    context_separators: bool,
+    root: Option<&Path>,
+) -> Vec<(&'a str, bool)> {
     let mut broken = false;
-    split_lf(input)
-        .map(|line| {
-            if line.contains('\0') {
-                let literal = broken;
-                broken = false;
-                (line, literal)
-            } else if context_separators && line == "--" {
-                (line, false)
-            } else {
-                broken = true;
-                (line, true)
+    let mut records: Vec<(&str, bool)> = Vec::new();
+    for line in split_lf(input) {
+        if let Some((path, _)) = line.split_once('\0') {
+            // After a `--` line, `--\n<path>` may be the real name: if that file exists,
+            // the separator and this record are both shown as they are.
+            let after_separator = records
+                .last()
+                .is_some_and(|(last, literal)| *last == "--" && !literal);
+            let joined = after_separator
+                && root.is_some_and(|root| root.join(format!("--\n{path}")).is_file());
+            if joined {
+                if let Some(last) = records.last_mut() {
+                    last.1 = true;
+                }
             }
-        })
-        .collect()
+            records.push((line, broken || joined));
+            broken = false;
+        } else if context_separators && line == "--" {
+            records.push((line, false));
+        } else {
+            broken = true;
+            records.push((line, true));
+        }
+    }
+    records
 }
 
 #[cfg(test)]
@@ -426,7 +441,9 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
         match input.strip_suffix('\n').unwrap_or(input).strip_suffix('\0') {
             // Split on NUL alone: a listed name may itself hold a newline.
             Some(list) => list.split('\0').map(|name| (name, true)).collect(),
-            None if input.contains('\0') => null_records(input, options.context_separators),
+            None if input.contains('\0') => {
+                null_records(input, options.context_separators, options.root.as_deref())
+            }
             None => split_lf(input).map(|line| (line, false)).collect(),
         };
     for (line, literal) in records {
@@ -797,6 +814,16 @@ mod tests {
             context_separators: false,
             ..CompactOptions::default()
         };
+        // `--\nREADME.md` is a real name here: the separator and the record stay as they are.
+        std::fs::write(dir.path().join("--\nREADME.md"), "needle\n").unwrap();
+        let joined = compact(
+            "--\nREADME.md\u{0}1:needle\n",
+            CompactOptions {
+                context_separators: true,
+                ..options.clone()
+            },
+        );
+        assert_eq!(joined, "--\nREADME.md:1:needle\n", "{joined}");
         // A CR in the name survives too.
         let crlf = compact("prefix\r\nREADME.md\u{0}1:needle\n", options.clone());
         assert_eq!(crlf, "prefix\r\nREADME.md:1:needle\n", "{crlf}");

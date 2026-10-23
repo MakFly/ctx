@@ -1025,3 +1025,21 @@ fn compact_run_prints_counts_as_the_search_wrote_them() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"2\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn compact_run_passes_non_utf8_content_through_byte_for_byte() {
+    use std::os::unix::ffi::OsStrExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+    fs::write(temporary.path().join(name), "needle\n").unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-r", "needle", "."])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    // The NUL ctx added after the path reads as grep's own `:`.
+    assert_eq!(output.stdout, b"./caf\xe9.txt:1:needle\n");
+}
