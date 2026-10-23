@@ -1011,3 +1011,17 @@ fn compact_run_passes_a_file_list_through_byte_for_byte() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"./caf\xe9.txt\n");
 }
+
+#[test]
+fn compact_run_prints_counts_as_the_search_wrote_them() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a:1:b.rs"), "x\nx\n").unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-c", "x", "a:1:b.rs"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"2\n");
+}

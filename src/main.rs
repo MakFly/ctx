@@ -952,6 +952,8 @@ async fn execute(cli: Cli) -> Result<()> {
                 max_line_chars: max_line_chars.max(1),
                 expand_tokens,
                 root: std::env::current_dir().ok(),
+                // Stdin: the search is unknown, so a `--` line may be a separator.
+                context_separators: true,
             };
             if !run {
                 let mut input = String::new();
@@ -1782,6 +1784,8 @@ fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> R
     if ctx_code::hook_rewrite::is_listing(words) {
         return run_read(words);
     }
+    let mut options = options;
+    options.context_separators = ctx_code::hook_rewrite::uses_context(words);
     let words = ctx_code::hook_rewrite::normalize_search(words);
     let mut child = match spawn_step(&words, std::process::Stdio::piped())? {
         Ok(child) => child,

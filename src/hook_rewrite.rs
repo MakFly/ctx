@@ -147,6 +147,22 @@ fn lists_or_counts(program: &str, shorts: &str, longs: &[String]) -> bool {
         })
 }
 
+/// Whether a search asks for context lines (`-A`, `-B`, `-C` and their long forms),
+/// the only case where its output holds `--` group separators.
+pub fn uses_context(words: &[String]) -> bool {
+    words.split_first().is_some_and(|(program, arguments)| {
+        search_flags(program, arguments).is_some_and(|(shorts, longs)| {
+            shorts.chars().any(|letter| "ABC".contains(letter))
+                || longs.iter().any(|flag| {
+                    matches!(
+                        flag.as_str(),
+                        "--context" | "--after-context" | "--before-context"
+                    )
+                })
+        })
+    })
+}
+
 /// One step of a `ctx compact --run` list.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RunStep {
@@ -470,7 +486,8 @@ fn is_search(program: &str, arguments: &[String]) -> bool {
     search_flags(program, arguments).is_some()
 }
 
-/// The flags a search sets (short letters, and long options without their value), read
+/// The options a search sets (short letters, valued ones included, and long options
+/// without their value), read
 /// as the tool reads them: bundles, attached values and `--`; `None` when an option is
 /// outside the known-safe set.
 fn search_flags(program: &str, arguments: &[String]) -> Option<(String, Vec<String>)> {
@@ -516,6 +533,7 @@ fn search_flags(program: &str, arguments: &[String]) -> Option<(String, Vec<Stri
         };
         for (offset, letter) in letters.char_indices() {
             if options.valued.contains(letter) {
+                shorts.push(letter);
                 // The rest of the word is the value, or the next word is.
                 if offset + letter.len_utf8() == letters.len() {
                     if index >= arguments.len() {

@@ -16,6 +16,10 @@ pub struct CompactOptions {
     pub expand_tokens: usize,
     /// Directory the search paths are relative to; no expansion without it.
     pub root: Option<PathBuf>,
+    /// Whether a bare `--` line may be a context-group separator (the search asked
+    /// for context lines). In `--null` output any other line without a NUL is part of
+    /// a file name holding a newline.
+    pub context_separators: bool,
 }
 
 impl Default for CompactOptions {
@@ -25,6 +29,7 @@ impl Default for CompactOptions {
             max_line_chars: 240,
             expand_tokens: 0,
             root: None,
+            context_separators: true,
         }
     }
 }
@@ -280,6 +285,29 @@ fn expand_definitions(
 }
 
 /// One parsed `path:line:text` match line, or a `path-line-text` context line.
+/// The lines of `--null` search output. Every real line carries a NUL after its path,
+/// but for a `--` separator when context was asked; any other line is the head of a
+/// file name holding a newline, so it and the record that ends that name are shown as
+/// they are, unattributed (the record's visible path is only the name's tail).
+fn null_records(input: &str, context_separators: bool) -> Vec<(&str, bool)> {
+    let mut broken = false;
+    input
+        .lines()
+        .map(|line| {
+            if line.contains('\0') {
+                let literal = broken;
+                broken = false;
+                (line, literal)
+            } else if context_separators && line == "--" {
+                (line, false)
+            } else {
+                broken = true;
+                (line, true)
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 fn parse(line: &str) -> Option<(&str, &str, char, &str)> {
     parse_in(line, None, None)
@@ -387,6 +415,7 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
         match input.strip_suffix('\n').unwrap_or(input).strip_suffix('\0') {
             // Split on NUL alone: a listed name may itself hold a newline.
             Some(list) => list.split('\0').map(|name| (name, true)).collect(),
+            None if input.contains('\0') => null_records(input, options.context_separators),
             None => input.lines().map(|line| (line, false)).collect(),
         };
     for (line, literal) in records {
@@ -745,6 +774,30 @@ mod tests {
             out,
             "a.rs\n1:x\n2:y\n... 2 more lines in 2 files not shown; narrow the search\n"
         );
+    }
+
+    #[test]
+    fn a_file_name_holding_a_newline_is_never_attributed_to_its_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "needle\n").unwrap();
+        let options = CompactOptions {
+            expand_tokens: 600,
+            root: Some(dir.path().to_path_buf()),
+            context_separators: false,
+            ..CompactOptions::default()
+        };
+        // The real file is `prefix\nREADME.md`; its visible tail names another file.
+        let out = compact("prefix\nREADME.md\u{0}1:needle\n", options.clone());
+        assert_eq!(out, "prefix\nREADME.md:1:needle\n", "{out}");
+        // Ordinary records still group, with a context separator when one was asked for.
+        let normal = compact(
+            "README.md\u{0}1:needle\n--\nREADME.md\u{0}1:needle\n",
+            CompactOptions {
+                context_separators: true,
+                ..options
+            },
+        );
+        assert!(normal.starts_with("README.md\n1:needle\n"), "{normal}");
     }
 
     #[test]
