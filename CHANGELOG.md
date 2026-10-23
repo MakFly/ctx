@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- `ctx_pack` expansion (`expand <path>:<start>-<end>`) now accepts only indexed
+  files that resolve inside the repository root. Absolute paths, `..` segments
+  and symlinks leaving the root are refused, and the expanded span obeys the
+  requested token budget.
+
 ## 0.3.0 - 2026-09-15
 
 ### Added

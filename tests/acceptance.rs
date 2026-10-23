@@ -264,6 +264,60 @@ fn pack_expand_round_trip_restores_omitted_body() {
 }
 
 #[test]
+fn pack_expand_refuses_paths_outside_the_index() {
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.txt");
+    fs::write(&secret, "TOP-SECRET\n").unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(root.join("app.py"), "def app():\n    return 1\n").unwrap();
+    index_repository(root).unwrap();
+    let relative = format!(
+        "../{}/secret.txt",
+        outside.path().file_name().unwrap().to_string_lossy()
+    );
+    for path in [secret.to_string_lossy().into_owned(), relative] {
+        let error = pack_query(&format!("expand {path}:1-5"), 800, "explore", root)
+            .expect_err("expansion outside the index must be refused");
+        assert!(error.to_string().contains("not an indexed file"), "{error}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn pack_expand_does_not_follow_symlinks_out_of_the_repository() {
+    let outside = tempfile::tempdir().unwrap();
+    let secret = outside.path().join("secret.py");
+    fs::write(&secret, "TOP-SECRET = 1\n").unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(root.join("app.py"), "def app():\n    return 1\n").unwrap();
+    index_repository(root).unwrap();
+    fs::remove_file(root.join("app.py")).unwrap();
+    std::os::unix::fs::symlink(&secret, root.join("app.py")).unwrap();
+    let expanded = pack_query("expand app.py:1-2", 800, "explore", root).unwrap();
+    assert!(
+        expanded
+            .hits
+            .iter()
+            .all(|hit| !hit.snippet.contains("TOP-SECRET"))
+    );
+}
+
+#[test]
+fn pack_expand_honors_the_token_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let body = "    value = 1\n".repeat(400);
+    fs::write(root.join("big.py"), format!("def big():\n{body}")).unwrap();
+    index_repository(root).unwrap();
+    let expanded = pack_query("expand big.py:1-401", 200, "explore", root).unwrap();
+    assert!(expanded.tokens <= 200, "tokens = {}", expanded.tokens);
+    assert_eq!(expanded.coverage, "partial");
+    assert!(expanded.hits.iter().all(|hit| hit.snippet_truncated));
+}
+
+#[test]
 fn pack_keeps_qualified_homonyms_and_propagates_source_truncation() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();

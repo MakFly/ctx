@@ -34,7 +34,7 @@ fn pack_query_inner(
     let started = Instant::now();
     let start = start.as_ref();
     if let Some((path, span_start, span_end)) = parse_expand(query) {
-        return expand_span(&path, span_start, span_end, start, started);
+        return expand_span(&path, span_start, span_end, budget_tokens, start, started);
     }
     let explore = intent != "edit";
     let exact = exact_symbols(query, start)?;
@@ -199,22 +199,33 @@ fn parse_expand(query: &str) -> Option<(String, usize, usize)> {
     }
 }
 
+/// Re-reads a span cited by an expansion hint. The path must name an admitted
+/// indexed file that still resolves inside the repository root: the query is
+/// caller-controlled, so absolute paths, `..` segments and symlinks leaving the
+/// root are refused. The result obeys the caller's token budget.
 fn expand_span(
     path: &str,
     start: usize,
     end: usize,
+    budget_tokens: usize,
     repo: &Path,
     started: Instant,
 ) -> Result<Envelope> {
     let connection = connect(&find_ctx(repo)?.join("index.sqlite"), false)?;
-    let root = PathBuf::from(get_meta(
-        &connection,
-        "repo_root",
-        &repo.to_string_lossy(),
-    )?);
-    let indexed: Option<(String, String, String, bool)> = connection
+    let root = PathBuf::from(get_meta(&connection, "repo_root", &repo.to_string_lossy())?);
+    let file_is_test: Option<bool> = connection
+        .query_row(
+            "SELECT is_test FROM files WHERE path=?1",
+            params![path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(file_is_test) = file_is_test else {
+        anyhow::bail!("expand refused: {path} is not an indexed file");
+    };
+    let indexed: Option<(String, String, String)> = connection
         .prepare(
-            "SELECT s.name, COALESCE(s.sig,''), COALESCE(s.snippet,''), f.is_test
+            "SELECT s.name, COALESCE(s.sig,''), COALESCE(s.snippet,'')
              FROM symbols s JOIN files f ON f.id=s.file_id
              WHERE f.path=?1 AND s.start=?2 AND s.end=?3
              ORDER BY s.id LIMIT 1",
@@ -222,19 +233,19 @@ fn expand_span(
         .and_then(|mut statement| {
             statement
                 .query_row(params![path, start as i64, end as i64], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })
                 .optional()
         })?;
-    let file_snippet = fs::read_to_string(root.join(path)).ok().map(|text| {
+    let file_snippet = read_contained(&root, path).map(|text| {
         let lines = text.lines().collect::<Vec<_>>();
         let from = start.saturating_sub(1).min(lines.len());
         let to = end.min(lines.len()).max(from);
         lines[from..to].join("\n")
     });
-    let (symbol, sig, fallback, is_test) = match indexed {
-        Some((name, sig, snippet, is_test)) => (Some(name), sig, snippet, is_test),
-        None => (None, String::new(), String::new(), false),
+    let (symbol, sig, fallback) = match indexed {
+        Some((name, sig, snippet)) => (Some(name), sig, snippet),
+        None => (None, String::new(), String::new()),
     };
     let snippet = file_snippet.unwrap_or(fallback);
     let hit = Hit {
@@ -242,7 +253,7 @@ fn expand_span(
         start,
         end,
         symbol,
-        kind: if is_test {
+        kind: if file_is_test {
             "test".to_owned()
         } else {
             "def".to_owned()
@@ -253,13 +264,23 @@ fn expand_span(
         score: 1.0,
         why: format!("expanded {path}:{start}-{end}"),
     };
-    Ok(Envelope {
-        tokens: estimate_tokens(&hit),
-        hits: vec![hit],
-        freshness_ms: started.elapsed().as_millis(),
-        coverage: "complete".to_owned(),
-        hint: None,
-    })
+    Ok(apply_budget(
+        vec![hit],
+        budget_tokens,
+        started,
+        "complete",
+        None,
+    ))
+}
+
+/// Reads `relative` only when its canonical target stays under `root`.
+fn read_contained(root: &Path, relative: &str) -> Option<String> {
+    let root = root.canonicalize().ok()?;
+    let target = root.join(relative).canonicalize().ok()?;
+    if !target.starts_with(&root) {
+        return None;
+    }
+    fs::read_to_string(target).ok()
 }
 
 fn is_definition(hit: &Hit) -> bool {
