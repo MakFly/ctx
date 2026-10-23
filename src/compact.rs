@@ -64,6 +64,18 @@ fn load(root: &Path, path: &str) -> Option<Source> {
 
 /// A span of source worth showing: a matched definition, or the window around a
 /// group of nearby matches.
+type Sources = std::collections::HashMap<String, Option<Source>>;
+
+/// The innermost function or method holding a line.
+fn enclosing(source: &Source, line: usize) -> Option<&crate::model::Symbol> {
+    source
+        .symbols
+        .iter()
+        .filter(|symbol| matches!(symbol.kind.as_str(), "function" | "method"))
+        .filter(|symbol| symbol.start <= line && line <= symbol.end)
+        .min_by_key(|symbol| symbol.end - symbol.start)
+}
+
 struct Candidate {
     path: String,
     from: usize,
@@ -92,9 +104,12 @@ fn definition<'a>(source: &'a Source, line: usize, text: &str) -> Option<&'a cra
 /// The source the search points at (a search is usually followed by reading it):
 /// matched definitions and windows around groups of nearby matches, the spans
 /// holding the most matches first, exact and numbered, within the budget.
-fn expand_definitions(matches: &[(String, usize, String)], root: &Path, budget: usize) -> String {
-    let mut sources: std::collections::HashMap<String, Option<Source>> =
-        std::collections::HashMap::new();
+fn expand_definitions(
+    matches: &[(String, usize, String)],
+    root: &Path,
+    budget: usize,
+    sources: &mut Sources,
+) -> String {
     let mut paths: Vec<&String> = Vec::new();
     for (path, _, _) in matches {
         if !paths.contains(&path) {
@@ -192,9 +207,6 @@ fn expand_definitions(matches: &[(String, usize, String)], root: &Path, budget: 
         }
         let numbers = &numbers_by_path[&candidate.path];
         if to < from || !numbers.iter().any(|line| (from..=to).contains(line)) {
-            continue;
-        }
-        if candidate.label.is_some() && (from, to) != (candidate.from, candidate.to) {
             continue;
         }
         let lines = &sources[&candidate.path]
@@ -296,6 +308,12 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
     let mut current: Option<&str> = None;
     let (mut omitted, mut omitted_paths) = (0usize, std::collections::BTreeSet::new());
     let mut matches = Vec::new();
+    let mut sources = Sources::new();
+    // With a root, each group of lines is preceded by the function holding it.
+    let scoped = (options.expand_tokens > 0)
+        .then_some(options.root.as_deref())
+        .flatten();
+    let mut scope: Option<usize> = None;
     for line in input.lines() {
         // `--` only separates context groups; the line numbers already show the gaps.
         if line == "--" {
@@ -309,9 +327,49 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
                     matches.push((path.to_owned(), number, text.to_owned()));
                 }
                 let header = (current != Some(path)).then(|| path.to_owned());
+                if header.is_some() {
+                    scope = None;
+                }
                 current = Some(path);
+                let holder = scoped
+                    .zip(number.parse::<usize>().ok())
+                    .and_then(|(root, line)| {
+                        let source = sources
+                            .entry(path.to_owned())
+                            .or_insert_with(|| load(root, path))
+                            .as_ref()?;
+                        enclosing(source, line).map(|symbol| {
+                            (
+                                symbol.start,
+                                format!(
+                                    "[{} {} {}-{}]",
+                                    symbol.kind, symbol.qualname, symbol.start, symbol.end
+                                ),
+                            )
+                        })
+                    });
+                let at_start = holder
+                    .as_ref()
+                    .is_some_and(|(start, _)| number.parse() == Ok(*start));
+                let scope_line = match holder {
+                    // A definition line names its function itself.
+                    Some((start, _)) if at_start => {
+                        scope = Some(start);
+                        None
+                    }
+                    Some((start, label)) if scope != Some(start) => {
+                        scope = Some(start);
+                        Some(label)
+                    }
+                    Some(_) => None,
+                    None => {
+                        scope = None;
+                        None
+                    }
+                };
                 (
                     header,
+                    scope_line,
                     format!(
                         "{number}{separator}{}",
                         shorten(text.trim_end(), options.max_line_chars)
@@ -321,13 +379,14 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
             }
             None => {
                 current = None;
-                (None, line.to_owned(), None)
+                scope = None;
+                (None, None, line.to_owned(), None)
             }
         };
-        let needed = 1 + usize::from(rendered.0.is_some());
+        let needed = 1 + usize::from(rendered.0.is_some()) + usize::from(rendered.1.is_some());
         if out.len() + needed > options.max_lines {
             omitted += 1;
-            if let Some(path) = rendered.2 {
+            if let Some(path) = rendered.3 {
                 omitted_paths.insert(path.to_owned());
             }
             continue;
@@ -335,7 +394,10 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
         if let Some(header) = rendered.0 {
             out.push(header);
         }
-        out.push(rendered.1);
+        if let Some(scope_line) = rendered.1 {
+            out.push(scope_line);
+        }
+        out.push(rendered.2);
     }
     let mut text = out.join("\n");
     if omitted > 0 {
@@ -353,7 +415,12 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
     if options.expand_tokens > 0
         && let Some(root) = &options.root
     {
-        text.push_str(&expand_definitions(&matches, root, options.expand_tokens));
+        text.push_str(&expand_definitions(
+            &matches,
+            root,
+            options.expand_tokens,
+            &mut sources,
+        ));
     }
     text
 }
@@ -451,7 +518,12 @@ mod tests {
         };
         let out = compact(input, options.clone());
         assert!(out.contains("definitions found:\n## a.py 3-5 function target\n3\tdef target(a):\n4\t    b = a + 1\n5\t    return b\n"), "{out}");
-        assert!(!out.contains("function other"), "{out}");
+        assert!(!out.contains("## a.py 37-38 function other"), "{out}");
+        // The call is placed in its function; the definition line needs no such line.
+        assert!(
+            out.starts_with("a.py\n3:def target(a):\n[function other 37-38]\n38:    target(2)\n"),
+            "{out}"
+        );
         // The call is not a definition: the lines around it follow instead.
         assert!(
             out.contains("around the matches:\n## a.py 30-38\n"),
