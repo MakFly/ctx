@@ -5,6 +5,7 @@ pub mod db;
 pub mod gitinfo;
 pub mod graph;
 pub mod harness;
+pub mod hook_rewrite;
 pub mod indexer;
 pub mod lsp;
 pub mod map;

@@ -328,6 +328,11 @@ enum MetricsCommand {
         #[arg(long)]
         model: Option<String>,
     },
+    /// Rewrite a shell command into a bounded ctx equivalent (PreToolUse hook).
+    Rewrite {
+        #[arg(long)]
+        harness: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1420,6 +1425,19 @@ fn execute_hook(command: HookCommand) -> Result<()> {
                 &payload,
             );
             ctx_code::reindex::request_async(&root, false)?;
+            Ok(())
+        }
+        HookCommand::Rewrite { harness } => {
+            // A PreToolUse hook never blocks: unreadable or unsupported input prints nothing.
+            let mut body = String::new();
+            let response = io::stdin()
+                .read_to_string(&mut body)
+                .ok()
+                .and_then(|_| serde_json::from_str::<Value>(&body).ok())
+                .and_then(|payload| ctx_code::hook_rewrite::hook_response(&payload, &harness));
+            if let Some(response) = response {
+                println!("{response}");
+            }
             Ok(())
         }
     }
