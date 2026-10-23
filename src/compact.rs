@@ -31,67 +31,182 @@ impl Default for CompactOptions {
 
 /// Largest single definition body shown in full, in tokens.
 const MAX_BODY_TOKENS: usize = 700;
-/// Lines shown before and after a match that is not a definition.
+/// Lines shown before a match, and after a lone one.
 const WINDOW_BEFORE: usize = 8;
 const WINDOW_AFTER: usize = 30;
+/// Matches at most this many lines apart share one window.
+const CLUSTER_GAP: usize = 15;
+/// Longest window shown around a group of matches.
+const MAX_WINDOW_LINES: usize = 80;
 
 fn estimate_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4)
 }
 
-/// A file's lines and the symbols parsed from it.
-type Parsed = (Vec<String>, Vec<crate::model::Symbol>);
+/// A file's lines and the symbols parsed from it (none for an unsupported language).
+struct Source {
+    lines: Vec<String>,
+    symbols: Vec<crate::model::Symbol>,
+}
 
-/// The bodies of the definitions whose first lines the search matched (a search for
-/// a function usually precedes reading it), then the lines around the other
-/// matches, exact and numbered, within the budget.
+fn load(root: &Path, path: &str) -> Option<Source> {
+    let full = root.join(path);
+    let text = std::fs::read_to_string(&full).ok()?;
+    let symbols = crate::config::language(&full)
+        .and_then(|lang| crate::parser::parse_source(&text, lang).ok())
+        .map(|(symbols, _)| symbols)
+        .unwrap_or_default();
+    Some(Source {
+        lines: text.lines().map(str::to_owned).collect(),
+        symbols,
+    })
+}
+
+/// A span of source worth showing: a matched definition, or the window around a
+/// group of nearby matches.
+struct Candidate {
+    path: String,
+    from: usize,
+    to: usize,
+    /// `kind qualname` for a definition, `None` for a window.
+    label: Option<String>,
+    hits: usize,
+    order: usize,
+}
+
+/// The definition whose first lines a match is (or just above it, for a signature
+/// spread over a decorator or an export line); not a call just below it.
+fn definition<'a>(source: &'a Source, line: usize, text: &str) -> Option<&'a crate::model::Symbol> {
+    source
+        .symbols
+        .iter()
+        .filter(|symbol| matches!(symbol.kind.as_str(), "function" | "method"))
+        .filter(|symbol| symbol.start <= line && line <= symbol.start + 2)
+        .filter(|symbol| {
+            text.contains(symbol.name.as_str())
+                && !text.trim_start().starts_with(&format!("{}(", symbol.name))
+        })
+        .min_by_key(|symbol| symbol.end - symbol.start)
+}
+
+/// The source the search points at (a search is usually followed by reading it):
+/// matched definitions and windows around groups of nearby matches, the spans
+/// holding the most matches first, exact and numbered, within the budget.
 fn expand_definitions(matches: &[(String, usize, String)], root: &Path, budget: usize) -> String {
-    let mut out = String::new();
-    let mut used = 0;
-    let mut seen = std::collections::HashSet::new();
-    // Line spans already printed, so a window never repeats a definition body.
-    let mut shown: Vec<(String, usize, usize)> = Vec::new();
-    let mut parsed: std::collections::HashMap<String, Option<Parsed>> =
+    let mut sources: std::collections::HashMap<String, Option<Source>> =
         std::collections::HashMap::new();
-    let mut sources: std::collections::HashMap<String, Option<Vec<String>>> =
+    let mut paths: Vec<&String> = Vec::new();
+    for (path, _, _) in matches {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut numbers_by_path: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
-    for (path, line, text) in matches {
-        let entry = parsed.entry(path.clone()).or_insert_with(|| {
-            let full = root.join(path);
-            let lang = crate::config::language(&full)?;
-            let source = std::fs::read_to_string(&full).ok()?;
-            let (symbols, _) = crate::parser::parse_source(&source, lang).ok()?;
-            Some((source.lines().map(str::to_owned).collect(), symbols))
-        });
-        let Some((lines, symbols)) = entry else {
-            continue;
-        };
-        // The definition that starts on the matched line (or just above it, for a
-        // signature spread over a decorator or an export line).
-        let Some(symbol) = symbols
-            .iter()
-            .filter(|symbol| matches!(symbol.kind.as_str(), "function" | "method"))
-            .filter(|symbol| symbol.start <= *line && *line <= symbol.start + 2)
-            // The matched line must be the definition itself, not a call just below it.
-            .filter(|symbol| {
-                text.contains(symbol.name.as_str())
-                    && !text.trim_start().starts_with(&format!("{}(", symbol.name))
-            })
-            .min_by_key(|symbol| symbol.end - symbol.start)
+    for path in paths {
+        let Some(source) = sources
+            .entry(path.clone())
+            .or_insert_with(|| load(root, path))
         else {
             continue;
         };
-        if !seen.insert((path.clone(), symbol.start)) {
+        let length = source.lines.len();
+        let mut numbers: Vec<usize> = matches
+            .iter()
+            .filter(|(p, line, _)| p == path && (1..=length).contains(line))
+            .map(|(_, line, _)| *line)
+            .collect();
+        numbers.sort_unstable();
+        numbers.dedup();
+        let mut defined = Vec::new();
+        for (_, line, text) in matches.iter().filter(|(p, ..)| p == path) {
+            let Some(symbol) = definition(source, *line, text) else {
+                continue;
+            };
+            if defined.contains(&symbol.start) {
+                continue;
+            }
+            defined.push(symbol.start);
+            candidates.push(Candidate {
+                path: path.clone(),
+                from: symbol.start,
+                to: symbol.end.min(length),
+                label: Some(format!("{} {}", symbol.kind, symbol.qualname)),
+                hits: 0,
+                order: candidates.len(),
+            });
+        }
+        let mut index = 0;
+        while index < numbers.len() {
+            let first = numbers[index];
+            let mut last = first;
+            let mut count = 1;
+            while index + count < numbers.len() && numbers[index + count] <= last + CLUSTER_GAP {
+                last = numbers[index + count];
+                count += 1;
+            }
+            index += count;
+            let from = first.saturating_sub(WINDOW_BEFORE).max(1);
+            let to = if count == 1 {
+                first + WINDOW_AFTER
+            } else {
+                last + WINDOW_BEFORE
+            };
+            candidates.push(Candidate {
+                path: path.clone(),
+                from,
+                to: to.min(from + MAX_WINDOW_LINES - 1).min(length),
+                label: None,
+                hits: 0,
+                order: candidates.len(),
+            });
+        }
+        numbers_by_path.insert(path.clone(), numbers);
+    }
+    for candidate in &mut candidates {
+        candidate.hits = numbers_by_path[&candidate.path]
+            .iter()
+            .filter(|line| (candidate.from..=candidate.to).contains(line))
+            .count();
+    }
+    candidates.sort_by_key(|candidate| (std::cmp::Reverse(candidate.hits), candidate.order));
+    let mut used = 0;
+    let mut chosen: Vec<(usize, bool, String)> = Vec::new();
+    let mut spans: Vec<(String, usize, usize)> = Vec::new();
+    for candidate in candidates {
+        let (mut from, mut to) = (candidate.from, candidate.to);
+        // A window never repeats lines already shown: it is clipped, or dropped
+        // once none of its own matches is left.
+        for (path, start, end) in &spans {
+            if *path != candidate.path || *end < from || *start > to {
+                continue;
+            }
+            if *start <= from && to <= *end {
+                to = 0;
+            } else if *start <= from {
+                from = end + 1;
+            } else {
+                to = start - 1;
+            }
+        }
+        let numbers = &numbers_by_path[&candidate.path];
+        if to < from || !numbers.iter().any(|line| (from..=to).contains(line)) {
             continue;
         }
-        let end = symbol.end.min(lines.len());
-        shown.push((path.clone(), symbol.start, end));
-        let mut block = format!(
-            "## {path} {}-{end} {} {}\n",
-            symbol.start, symbol.kind, symbol.qualname
-        );
+        if candidate.label.is_some() && (from, to) != (candidate.from, candidate.to) {
+            continue;
+        }
+        let lines = &sources[&candidate.path]
+            .as_ref()
+            .expect("candidates come from read files")
+            .lines;
+        let mut block = match &candidate.label {
+            Some(label) => format!("## {} {from}-{to} {label}\n", candidate.path),
+            None => format!("## {} {from}-{to}\n", candidate.path),
+        };
         let mut cut = None;
-        for number in symbol.start..=end {
+        for number in from..=to {
             let text = format!("{number}\t{}\n", lines[number - 1]);
             if estimate_tokens(&block) + estimate_tokens(&text) > MAX_BODY_TOKENS {
                 cut = Some(number);
@@ -99,55 +214,33 @@ fn expand_definitions(matches: &[(String, usize, String)], root: &Path, budget: 
             }
             block.push_str(&text);
         }
-        if let Some(from) = cut {
-            block.push_str(&format!("... {from}-{end} elided\n"));
+        if let Some(cut) = cut {
+            block.push_str(&format!("... {cut}-{to} elided\n"));
+            to = cut - 1;
         }
         let cost = estimate_tokens(&block);
         if used + cost > budget {
-            break;
+            continue;
         }
         used += cost;
-        out.push_str(&block);
+        spans.push((candidate.path.clone(), from, to));
+        chosen.push((candidate.order, candidate.label.is_some(), block));
     }
-    let mut out = if out.is_empty() {
-        out
-    } else {
-        format!("definitions found:\n{out}")
-    };
-    // Then the source around the other matches (a search is usually followed by
-    // reading just that neighbourhood), while the budget lasts.
-    let mut windows = String::new();
-    for (path, line, _) in matches {
-        if shown
-            .iter()
-            .any(|(p, from, to)| p == path && from <= line && line <= to)
-        {
-            continue;
-        }
-        let Some(lines) = sources.entry(path.clone()).or_insert_with(|| {
-            std::fs::read_to_string(root.join(path))
-                .ok()
-                .map(|text| text.lines().map(str::to_owned).collect())
-        }) else {
-            continue;
-        };
-        if *line == 0 || *line > lines.len() {
-            continue;
-        }
-        let from = line.saturating_sub(WINDOW_BEFORE).max(1);
-        let to = (line + WINDOW_AFTER).min(lines.len());
-        let mut block = format!("## {path} {from}-{to}\n");
-        for number in from..=to {
-            block.push_str(&format!("{number}\t{}\n", lines[number - 1]));
-        }
-        let cost = estimate_tokens(&block);
-        if used + cost > budget {
-            break;
-        }
-        used += cost;
-        shown.push((path.clone(), from, to));
-        windows.push_str(&block);
+    chosen.sort_by_key(|(order, ..)| *order);
+    let mut out = String::new();
+    let definitions: String = chosen
+        .iter()
+        .filter(|(_, is_definition, _)| *is_definition)
+        .map(|(.., block)| block.as_str())
+        .collect();
+    if !definitions.is_empty() {
+        out.push_str(&format!("definitions found:\n{definitions}"));
     }
+    let windows: String = chosen
+        .iter()
+        .filter(|(_, is_definition, _)| !*is_definition)
+        .map(|(.., block)| block.as_str())
+        .collect();
     if !windows.is_empty() {
         out.push_str(&format!("around the matches:\n{windows}"));
     }
@@ -344,10 +437,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("a.py"),
-            "import os\n\ndef target(a):\n    b = a + 1\n    return b\n\ndef other():\n    target(2)\n",
+            format!(
+                "import os\n\ndef target(a):\n    b = a + 1\n    return b\n\n{}def other():\n    target(2)\n",
+                "x = 1\n".repeat(30)
+            ),
         )
         .unwrap();
-        let input = "a.py:3:def target(a):\na.py:8:    target(2)\n";
+        let input = "a.py:3:def target(a):\na.py:38:    target(2)\n";
         let options = CompactOptions {
             expand_tokens: 500,
             root: Some(dir.path().to_path_buf()),
@@ -356,6 +452,11 @@ mod tests {
         let out = compact(input, options.clone());
         assert!(out.contains("definitions found:\n## a.py 3-5 function target\n3\tdef target(a):\n4\t    b = a + 1\n5\t    return b\n"), "{out}");
         assert!(!out.contains("function other"), "{out}");
+        // The call is not a definition: the lines around it follow instead.
+        assert!(
+            out.contains("around the matches:\n## a.py 30-38\n"),
+            "{out}"
+        );
         let none = compact(
             input,
             CompactOptions {
@@ -376,10 +477,10 @@ mod tests {
             root: Some(dir.path().to_path_buf()),
             ..CompactOptions::default()
         };
-        // Line 20 falls inside the window of line 15, so it adds nothing.
+        // Lines 15 and 20 are close: one window from 8 before the first to 8 after the last.
         let out = compact("a.txt:15:line 15\na.txt:20:line 20\n", options.clone());
         assert!(
-            out.contains("around the matches:\n## a.txt 7-45\n7\tline 7\n"),
+            out.contains("around the matches:\n## a.txt 7-28\n7\tline 7\n"),
             "{out}"
         );
         assert_eq!(out.matches("## a.txt").count(), 1, "{out}");
@@ -387,10 +488,20 @@ mod tests {
             "a.txt:15:line 15\n",
             CompactOptions {
                 expand_tokens: 20,
-                ..options
+                ..options.clone()
             },
         );
         assert!(!tight.contains("around the matches"), "{tight}");
+        // Under a tight budget the dense group wins over the lone first match.
+        let dense = compact(
+            "a.txt:2:line 2\na.txt:60:line 60\na.txt:62:line 62\na.txt:65:line 65\n",
+            CompactOptions {
+                expand_tokens: 150,
+                ..options
+            },
+        );
+        assert!(dense.contains("## a.txt 52-73\n"), "{dense}");
+        assert!(!dense.contains("## a.txt 1-"), "{dense}");
     }
 
     #[test]
