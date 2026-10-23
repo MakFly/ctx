@@ -142,6 +142,13 @@ points at follows within a token budget: the matched definitions and the lines
 around the densest groups of matches. Matched lines stay verbatim. Anything else
 (a pipe, a redirect, an expansion, an unknown option) runs untouched.
 
+Under `--run`, ctx adds `-H --null -n` to a content search so every line carries
+its path, ended by a NUL, and its number. Output it does not read (file lists,
+counts, quiet searches, no path or no number per line, a heading, forced colour)
+and output over 16 MB or not in UTF-8 go out byte for byte, as the search wrote
+them. One limit remains: a file name holding a newline cannot be told apart in
+line-based output; such a line is shown as is, unattributed.
+
 `ctx install --target claude` adds the hook to `.claude/settings.json`, with a
 PostToolUse hook (`ctx hook compact-output`) that compacts Claude's own Grep
 results the same way. For Codex, add it to `~/.codex/hooks.json`:
@@ -156,6 +163,12 @@ rewritten command: it only ever contains the checked steps above, and a `cd`
 prefix is not rewritten for Codex. `--expand-tokens N` sets the appended-source
 budget (default 600, chosen by bench; 0 disables it). `ctx compact` also filters any search
 output on stdin: `rg -n login | ctx compact`.
+
+Measured on 2026-10-23 against the same agent with no hook (paired runs, 90%
+bootstrap interval, answer quality unchanged): code questions cost Claude 14% fewer
+input tokens [9, 18] and 4% less after cache pricing [1, 7], Codex 6% fewer [0, 13];
+edits cost Codex 7% fewer [1, 14], and Claude about the same (its edits already read
+the whole file).
 
 ## Live indexing and freshness
 
