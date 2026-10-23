@@ -23,6 +23,20 @@ const QUIET: Duration = Duration::from_millis(200);
 const MAX_BURST: Duration = Duration::from_secs(2);
 const RECONCILE: Duration = Duration::from_secs(3600);
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Drift {
+    pub added: usize,
+    pub modified: usize,
+    pub removed: usize,
+    pub unknown: bool,
+}
+
+impl Drift {
+    pub fn is_stale(&self) -> bool {
+        self.unknown || self.added > 0 || self.modified > 0 || self.removed > 0
+    }
+}
+
 /// Adapted from tgrep's FsEventBurst: deduplicate paths, preserve a burst's
 /// first timestamp, and never extend the maximum deadline on every event.
 #[derive(Default)]
@@ -340,12 +354,14 @@ pub fn check_coverage(
     envelope
 }
 
-fn evidence_stale(root: &Path) -> bool {
+pub fn index_drift(root: &Path) -> Drift {
+    let mut drift = Drift::default();
     let Ok(connection) = rusqlite::Connection::open_with_flags(
         ctx_dir(root).join("index.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ) else {
-        return true;
+        drift.unknown = true;
+        return drift;
     };
     let indexed = (|| -> rusqlite::Result<HashMap<String, String>> {
         let mut statement = connection.prepare(
@@ -356,31 +372,45 @@ fn evidence_stale(root: &Path) -> bool {
             .collect()
     })();
     let Ok(indexed) = indexed else {
-        return true;
+        drift.unknown = true;
+        return drift;
     };
     let Ok(walk) = crate::indexer::walk_metadata_report(root) else {
-        return true;
+        drift.unknown = true;
+        return drift;
     };
     if walk.errors > 0 {
-        return true;
+        drift.unknown = true;
+        return drift;
     }
-    let mut matched = 0;
+    let mut present = HashSet::new();
     for path in walk.paths {
         let Ok(relative) = crate::config::relative_path(&path, root) else {
-            return true;
+            drift.unknown = true;
+            continue;
         };
+        present.insert(relative.clone());
         let Ok(metadata) = path.metadata() else {
-            return true;
+            drift.unknown = true;
+            continue;
         };
         let version = format!("{:?}", ctx_tgrep::builder::file_version(&metadata));
         match indexed.get(&relative) {
-            Some(stored) if stored == &version => matched += 1,
-            Some(_) => return true,
+            Some(stored) if stored == &version => {}
+            Some(_) => drift.modified += 1,
             None if snapshot_skips_live(&path) => {}
-            None => return true,
+            None => drift.added += 1,
         }
     }
-    matched != indexed.len()
+    drift.removed = indexed
+        .keys()
+        .filter(|path| !present.contains(*path))
+        .count();
+    drift
+}
+
+fn evidence_stale(root: &Path) -> bool {
+    index_drift(root).is_stale()
 }
 
 fn snapshot_skips_live(path: &Path) -> bool {

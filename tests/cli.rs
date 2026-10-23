@@ -185,6 +185,77 @@ fn cli_indexes_and_searches_with_json_envelope() {
 }
 
 #[test]
+fn status_reports_index_drift_for_admitted_file_changes() {
+    let (_temporary, root) = fixture();
+    let index = || {
+        let output = Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(&root)
+            .args(["index"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let status = || {
+        let output = Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(&root)
+            .args(["status", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+
+    index();
+    let fresh = status();
+    assert_eq!(fresh["stale"], false);
+    assert_eq!(fresh["drift"]["added"], 0);
+    assert_eq!(fresh["drift"]["modified"], 0);
+    assert_eq!(fresh["drift"]["removed"], 0);
+
+    fs::write(
+        root.join("auth.py"),
+        "def login():\n    return 'modified'\n",
+    )
+    .unwrap();
+    let modified = status();
+    assert_eq!(modified["stale"], true);
+    assert_eq!(modified["drift"]["modified"], 1);
+
+    index();
+    fs::write(
+        root.join("new_admitted.py"),
+        "def new_file():\n    return True\n",
+    )
+    .unwrap();
+    let added = status();
+    assert_eq!(added["stale"], true);
+    assert_eq!(added["drift"]["added"], 1);
+
+    index();
+    fs::remove_file(root.join("payments.py")).unwrap();
+    let removed = status();
+    assert_eq!(removed["stale"], true);
+    assert_eq!(removed["drift"]["removed"], 1);
+
+    index();
+    let refreshed = status();
+    assert_eq!(refreshed["stale"], false);
+    assert_eq!(refreshed["drift"]["added"], 0);
+    assert_eq!(refreshed["drift"]["modified"], 0);
+    assert_eq!(refreshed["drift"]["removed"], 0);
+}
+
+#[test]
 fn explore_refreshes_git_and_non_git_sources_before_reusing_briefings() {
     for git in [false, true] {
         let project = tempfile::tempdir().unwrap();

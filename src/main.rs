@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -1352,25 +1352,8 @@ fn status() -> Result<Value> {
         connection.query_row("SELECT count(*) FROM edges WHERE source='lsp'", [], |row| {
             row.get(0)
         })?;
-    let mut statement = connection.prepare("SELECT path,mtime FROM files")?;
-    let mut stale = false;
-    for row in statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
-    })? {
-        let (path, indexed_mtime) = row?;
-        let file = root.join(path);
-        let modified = file
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH)
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
-        if !file.is_file() || modified > indexed_mtime + 0.000_001 {
-            stale = true;
-            break;
-        }
-    }
+    let drift = ctx_code::watcher::index_drift(&root);
+    let stale = drift.is_stale();
     let info = git_info(&root);
     let watch = ctx_code::watcher::status(&root);
     Ok(json!({
@@ -1384,6 +1367,11 @@ fn status() -> Result<Value> {
         "database": database,
         "size_bytes": fs::metadata(&database)?.len(),
         "stale": stale,
+        "drift": {
+            "added": drift.added,
+            "modified": drift.modified,
+            "removed": drift.removed,
+        },
         "text_generation": get_meta(&connection, "text_generation", "")?,
         "previous_text_generation": get_meta(&connection, "previous_text_generation", "")?,
         "excluded_too_large": get_meta(&connection, "excluded_too_large", "0")?.parse::<u64>().unwrap_or(0),
