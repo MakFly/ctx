@@ -1,7 +1,8 @@
 //! PreToolUse hook that makes a few shell commands cheaper to read without changing what they do.
 //!
-//! A search (`rg`, `grep`, `git grep`, optionally piped to head/tail/sort/uniq) runs unchanged and
-//! its output is piped to `ctx compact`, which groups matches by file and bounds the output. A
+//! A search (`rg`, `grep`, optionally piped to head/tail/sort/uniq) runs unchanged and
+//! its output is piped to `ctx compact` (a bare search runs under `ctx compact --run`, which
+//! keeps its exit status), which groups matches by file and bounds the output. A
 //! list is rewritten only when every other command in it is a plain read, since Codex runs the
 //! rewritten command without asking. Anything else runs untouched; the hook never blocks.
 
@@ -150,22 +151,46 @@ fn rewrite_search_pipeline(command: &str) -> Option<String> {
     if !is_search(program, arguments) || !filters.iter().all(|stage| is_line_filter(stage)) {
         return None;
     }
-    let command = command.trim();
     // `-H` prints the path even for a single file, so the lines parse and the
     // source around them can be appended.
-    let command = match program.as_str() {
-        "rg" | "grep" => match command.strip_prefix(program.as_str()) {
-            Some(rest) if rest.starts_with([' ', '\t']) => format!("{program} -H{rest}"),
-            _ => command.to_owned(),
-        },
-        _ => command.to_owned(),
-    };
-    // With no filter the search's own status is the pipeline's: `ctx compact --fail-empty`
-    // exits 1 on no output, as `rg` and `grep` do on no match, so `rg x && y` still gates `y`.
+    let mut words = vec![program.clone(), "-H".to_owned()];
+    words.extend(arguments.iter().cloned());
+    let search = words
+        .iter()
+        .map(|word| shell_word(word))
+        .collect::<Vec<_>>()
+        .join(" ");
     if filters.is_empty() {
-        Some(format!("{command} | ctx compact --fail-empty"))
+        // `ctx compact --run` runs the search itself and exits with its status, so
+        // `rg -q x && y` gates `y` exactly as before.
+        return Some(format!("ctx compact --run -- {search}"));
+    }
+    let filters = filters
+        .iter()
+        .map(|stage| {
+            stage
+                .iter()
+                .map(|word| shell_word(word))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    // The last filter's status was the pipeline's; `head`, `tail`, `sort` and `uniq`
+    // exit 0 on any input, as `ctx compact` does.
+    Some(format!("{search} | {filters} | ctx compact"))
+}
+
+/// `word` as one shell word: bare when it holds only safe characters, else single-quoted.
+fn shell_word(word: &str) -> String {
+    if !word.is_empty()
+        && word
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./=:,+@%-".contains(&byte))
+    {
+        word.to_owned()
     } else {
-        Some(format!("{command} | ctx compact"))
+        format!("'{}'", word.replace('\'', "'\\''"))
     }
 }
 
@@ -229,29 +254,170 @@ fn split_list(command: &str) -> Option<Vec<(String, String)>> {
     Some(segments)
 }
 
-/// A search whose output is `path:line:text` lines, with no option that runs another program.
+/// Options of a search that only select, match or format: anything else (`rg --pre`,
+/// `--hostname-bin`, `-z`, an abbreviated long option...) leaves the command alone.
+struct SearchOptions {
+    /// Short letters taking no value.
+    flags: &'static str,
+    /// Short letters taking a value (attached, or the next word).
+    valued: &'static str,
+    /// Long options taking no value.
+    long_flags: &'static [&'static str],
+    /// Long options taking a value (`--name=value`, or the next word).
+    long_valued: &'static [&'static str],
+}
+
+const RG: SearchOptions = SearchOptions {
+    flags: "nNHhiSswxFUPvcloLuI",
+    valued: "egtTCABmMdj",
+    long_flags: &[
+        "--line-number",
+        "--no-line-number",
+        "--with-filename",
+        "--no-filename",
+        "--ignore-case",
+        "--smart-case",
+        "--case-sensitive",
+        "--word-regexp",
+        "--line-regexp",
+        "--fixed-strings",
+        "--multiline",
+        "--multiline-dotall",
+        "--pcre2",
+        "--invert-match",
+        "--count",
+        "--count-matches",
+        "--files-with-matches",
+        "--files-without-match",
+        "--only-matching",
+        "--hidden",
+        "--no-ignore",
+        "--no-ignore-vcs",
+        "--follow",
+        "--no-heading",
+        "--heading",
+        "--trim",
+        "--column",
+        "--no-messages",
+        "--byte-offset",
+        "--vimgrep",
+        "--files",
+    ],
+    long_valued: &[
+        "--regexp",
+        "--glob",
+        "--iglob",
+        "--type",
+        "--type-not",
+        "--context",
+        "--after-context",
+        "--before-context",
+        "--max-count",
+        "--max-columns",
+        "--max-depth",
+        "--sort",
+        "--sortr",
+        "--color",
+        "--threads",
+        "--max-filesize",
+        "--engine",
+    ],
+};
+
+const GREP: SearchOptions = SearchOptions {
+    flags: "nrRiwxFEGPvclLHhosqIa",
+    valued: "efABCm",
+    long_flags: &[
+        "--line-number",
+        "--recursive",
+        "--dereference-recursive",
+        "--ignore-case",
+        "--word-regexp",
+        "--line-regexp",
+        "--fixed-strings",
+        "--extended-regexp",
+        "--perl-regexp",
+        "--invert-match",
+        "--count",
+        "--files-with-matches",
+        "--files-without-match",
+        "--with-filename",
+        "--no-filename",
+        "--only-matching",
+        "--no-messages",
+        "--quiet",
+        "--silent",
+    ],
+    long_valued: &[
+        "--regexp",
+        "--file",
+        "--after-context",
+        "--before-context",
+        "--context",
+        "--max-count",
+        "--include",
+        "--exclude",
+        "--exclude-dir",
+        "--color",
+        "--colour",
+        "--binary-files",
+    ],
+};
+
+/// A search whose output is `path:line:text` lines, with only options that select,
+/// match or format (see [`SearchOptions`]); operands are patterns and paths.
 fn is_search(program: &str, arguments: &[String]) -> bool {
-    let (arguments, runs_programs): (&[String], &[&str]) = match program {
-        "rg" => (arguments, &["--pre", "--pre-glob", "-z", "--search-zip"]),
-        "grep" => (arguments, &[]),
-        "git" if arguments.first().is_some_and(|sub| sub == "grep") => {
-            (&arguments[1..], &["-O", "--open-files-in-pager"])
-        }
+    let options = match program {
+        "rg" => &RG,
+        "grep" => &GREP,
         _ => return false,
     };
-    let short = match program {
-        "rg" => Some('z'),
-        "git" => Some('O'),
-        _ => None,
-    };
-    !arguments.iter().any(|argument| {
-        runs_programs
-            .iter()
-            .any(|flag| argument == flag || argument.starts_with(&format!("{flag}=")))
-            || short.is_some_and(|flag| {
-                argument.starts_with('-') && !argument.starts_with("--") && argument.contains(flag)
-            })
-    })
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        index += 1;
+        if argument == "--" {
+            return true;
+        }
+        if let Some(long) = argument.strip_prefix("--") {
+            let name = format!("--{}", long.split('=').next().unwrap_or_default());
+            if long.contains('=') {
+                if !options.long_valued.contains(&name.as_str()) {
+                    return false;
+                }
+            } else if options.long_valued.contains(&argument) {
+                if index >= arguments.len() {
+                    return false;
+                }
+                index += 1;
+            } else if !options.long_flags.contains(&argument) {
+                return false;
+            }
+            continue;
+        }
+        let Some(letters) = argument
+            .strip_prefix('-')
+            .filter(|letters| !letters.is_empty())
+        else {
+            continue;
+        };
+        for (offset, letter) in letters.char_indices() {
+            if options.valued.contains(letter) {
+                // The rest of the word is the value, or the next word is.
+                if offset + letter.len_utf8() == letters.len() {
+                    if index >= arguments.len() {
+                        return false;
+                    }
+                    index += 1;
+                }
+                break;
+            }
+            if !options.flags.contains(letter) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// `head`, `tail`, `sort` or `uniq` reading the pipe, with options that only filter or
@@ -457,7 +623,9 @@ fn scan_word(text: &str, start: usize) -> Option<(String, usize)> {
             },
             '|' | '&' | ';' | '<' | '>' | '(' | ')' | '$' | '`' | '\n' | '*' | '?' | '[' | '{'
             | '!' => return None,
-            '~' | '#' if at_start => return None,
+            // Bash expands an unquoted `~` after `=` too (`--glob=~/x`): decline it anywhere.
+            '~' => return None,
+            '#' if at_start => return None,
             other => word.push(other),
         }
         at_start = false;
@@ -555,39 +723,67 @@ mod tests {
     fn searches_run_unchanged_and_pipe_into_compact() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
-        for command in [
-            "rg -n foo",
-            "rg -n \"a|b\" src -g '*.ts'",
-            "rg -n foo src | head -160",
-            "grep -rn foo .",
-            "git grep -n foo -- src",
-            "rg -n foo | sort | uniq -c",
+        for (command, rewritten) in [
+            ("rg -n foo", "ctx compact --run -- rg -H -n foo"),
+            (
+                "rg -n \"a|b\" src -g '*.ts'",
+                "ctx compact --run -- rg -H -n 'a|b' src -g '*.ts'",
+            ),
+            (
+                "rg -n foo src | head -160",
+                "rg -H -n foo src | head -160 | ctx compact",
+            ),
+            ("grep -rn foo .", "ctx compact --run -- grep -H -rn foo ."),
+            (
+                "rg -n foo | sort | uniq -c",
+                "rg -H -n foo | sort | uniq -c | ctx compact",
+            ),
+            (
+                "rg -n \"it's\" a.rs",
+                "ctx compact --run -- rg -H -n 'it'\\''s' a.rs",
+            ),
         ] {
             assert_eq!(
                 rewrite_command(command, cwd).as_deref(),
-                Some(
-                    format!(
-                        "{} | ctx compact{}",
-                        command
-                            .replacen("rg ", "rg -H ", 1)
-                            .replacen("grep -rn", "grep -H -rn", 1)
-                            .replacen("git grep -H -rn", "git grep -rn", 1),
-                        if command.contains(" | ") {
-                            ""
-                        } else {
-                            " --fail-empty"
-                        }
-                    )
-                    .as_str()
-                ),
+                Some(rewritten),
                 "{command}"
             );
         }
         std::fs::create_dir_all(cwd.join("src")).unwrap();
         assert_eq!(
             rewrite_command("cd src && rg -n foo", cwd).unwrap(),
-            "cd src && rg -H -n foo | ctx compact --fail-empty"
+            "cd src && ctx compact --run -- rg -H -n foo"
         );
+    }
+
+    #[test]
+    fn a_search_with_an_option_outside_the_known_safe_set_is_left_alone() {
+        let cwd = Path::new("/");
+        for command in [
+            "rg --hostname-bin=sh foo",
+            "rg --hostname-bin sh foo",
+            "rg --pre=cat foo",
+            "rg --search-zip foo",
+            "rg --type-add 'x:*.x' foo",
+            "rg --line-num foo",
+            "grep --incl=*.rs foo .",
+            "git grep -n foo",
+            "git grep --textconv foo",
+            "git grep --open-files-in-pag=printf foo",
+            "rg foo ~/x",
+            "rg --glob=~/x foo",
+            "rg -e",
+        ] {
+            assert!(rewrite_command(command, cwd).is_none(), "{command:?}");
+        }
+        for command in [
+            "rg -niC3 foo src",
+            "rg -g '*.ts' --max-count=5 -t rust foo",
+            "rg -- --pre src",
+            "grep -rn --include='*.rs' -e foo .",
+        ] {
+            assert!(rewrite_command(command, cwd).is_some(), "{command:?}");
+        }
     }
 
     #[test]
@@ -627,11 +823,11 @@ mod tests {
         let cwd = dir.path();
         assert_eq!(
             rewrite_command("sed -n '1,20p' a.rs; rg -n foo src", cwd).unwrap(),
-            "sed -n '1,20p' a.rs; rg -H -n foo src | ctx compact --fail-empty"
+            "sed -n '1,20p' a.rs; ctx compact --run -- rg -H -n foo src"
         );
         assert_eq!(
             rewrite_command("rg -n a && rg -n b | head -5", cwd).unwrap(),
-            "rg -H -n a | ctx compact --fail-empty && rg -H -n b | head -5 | ctx compact"
+            "ctx compact --run -- rg -H -n a && rg -H -n b | head -5 | ctx compact"
         );
         assert!(rewrite_command("sed -n '1,2p' a; ls", cwd).is_none());
         assert!(rewrite_command("rg a; rm x > y", cwd).is_none());
@@ -731,7 +927,7 @@ mod tests {
         let claude = hook_response(&payload, "claude").unwrap();
         assert_eq!(
             claude["hookSpecificOutput"]["updatedInput"]["command"],
-            "rg -H -n foo | ctx compact --fail-empty"
+            "ctx compact --run -- rg -H -n foo"
         );
         assert_eq!(
             claude["hookSpecificOutput"]["updatedInput"]["description"],

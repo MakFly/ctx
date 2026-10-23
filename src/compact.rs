@@ -1,5 +1,5 @@
 //! `ctx compact`: a stdin filter for search output (`path:line:text`, as printed by
-//! `rg -n`, `grep -n` and `git grep -n`). It prints each path once, keeps every
+//! `rg -n`, `grep -n` and `git grep -n`; the hook only routes `rg` and `grep` here). It prints each path once, keeps every
 //! line's number and text, shortens very long lines and bounds the total, saying
 //! what it left out. Lines it does not recognise pass through unchanged.
 
@@ -82,7 +82,6 @@ struct Candidate {
     to: usize,
     /// `kind qualname` for a definition, `None` for a window.
     label: Option<String>,
-    hits: usize,
     order: usize,
 }
 
@@ -148,7 +147,6 @@ fn expand_definitions(
                 from: symbol.start,
                 to: symbol.end.min(length),
                 label: Some(format!("{} {}", symbol.kind, symbol.qualname)),
-                hits: 0,
                 order: candidates.len(),
             });
         }
@@ -178,47 +176,32 @@ fn expand_definitions(
                 from,
                 to: to.min(from + MAX_WINDOW_LINES - 1).min(length),
                 label: None,
-                hits: 0,
                 order: candidates.len(),
             });
         }
         numbers_by_path.insert(path.clone(), numbers);
     }
-    for candidate in &mut candidates {
-        candidate.hits = numbers_by_path[&candidate.path]
-            .iter()
-            .filter(|line| (candidate.from..=candidate.to).contains(line))
-            .count();
-    }
-    candidates.sort_by_key(|candidate| (std::cmp::Reverse(candidate.hits), candidate.order));
     // The two section headings count against the budget too.
     let mut used = estimate_tokens("definitions found:\naround the matches:\n");
     let mut chosen: Vec<(usize, bool, String)> = Vec::new();
     let mut spans: Vec<(String, usize, usize)> = Vec::new();
-    for candidate in candidates {
+    // Each candidate as it would be printed now: clipped against the spans already
+    // shown, cut at the body cap, with the matches it still holds.
+    let render = |candidate: &Candidate, spans: &[(String, usize, usize)]| {
         let (mut from, mut to) = (candidate.from, candidate.to);
-        // A window never repeats lines already shown: it is clipped, or dropped
-        // once none of its own matches is left.
-        for (path, start, end) in &spans {
+        for (path, start, end) in spans {
             if *path != candidate.path || *end < from || *start > to {
                 continue;
             }
             if *start <= from && to <= *end {
-                to = 0;
+                return None;
             } else if *start <= from {
                 from = end + 1;
             } else {
                 to = start - 1;
             }
         }
-        let numbers = &numbers_by_path[&candidate.path];
-        if to < from || !numbers.iter().any(|line| (from..=to).contains(line)) {
-            continue;
-        }
-        let lines = &sources[&candidate.path]
-            .as_ref()
-            .expect("candidates come from read files")
-            .lines;
+        let lines = &sources[&candidate.path].as_ref()?.lines;
         let mut block = match &candidate.label {
             Some(label) => format!("## {} {from}-{to} {label}\n", candidate.path),
             None => format!("## {} {from}-{to}\n", candidate.path),
@@ -236,6 +219,25 @@ fn expand_definitions(
             block.push_str(&format!("... {cut}-{to} elided\n"));
             to = cut - 1;
         }
+        let hits = numbers_by_path[&candidate.path]
+            .iter()
+            .filter(|line| (from..=to).contains(line))
+            .count();
+        (hits > 0 && from <= to).then_some((hits, from, to, block))
+    };
+    let mut remaining: Vec<Candidate> = candidates;
+    loop {
+        let best = remaining
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                render(candidate, &spans).map(|rendered| (index, rendered))
+            })
+            .max_by_key(|(index, (hits, ..))| (*hits, std::cmp::Reverse(remaining[*index].order)));
+        let Some((index, (_, from, to, block))) = best else {
+            break;
+        };
+        let candidate = remaining.swap_remove(index);
         let cost = estimate_tokens(&block);
         if used + cost > budget {
             continue;
@@ -333,10 +335,8 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
                     matches.push((path.to_owned(), number, text.to_owned()));
                 }
                 let header = (current != Some(path)).then(|| path.to_owned());
-                if header.is_some() {
-                    scope = None;
-                }
-                current = Some(path);
+                // Display state moves only once these lines are accepted below.
+                let mut next_scope = if header.is_some() { None } else { scope };
                 let holder = scoped
                     .zip(number.parse::<usize>().ok())
                     .and_then(|(root, line)| {
@@ -360,16 +360,16 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
                 let scope_line = match holder {
                     // A definition line names its function itself.
                     Some((start, _)) if at_start => {
-                        scope = Some(start);
+                        next_scope = Some(start);
                         None
                     }
-                    Some((start, label)) if scope != Some(start) => {
-                        scope = Some(start);
+                    Some((start, label)) if next_scope != Some(start) => {
+                        next_scope = Some(start);
                         Some(label)
                     }
                     Some(_) => None,
                     None => {
-                        scope = None;
+                        next_scope = None;
                         None
                     }
                 };
@@ -381,22 +381,22 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
                         shorten(text, options.max_line_chars)
                     ),
                     Some(path),
+                    next_scope,
                 )
             }
-            None => {
-                current = None;
-                scope = None;
-                (None, None, line.to_owned(), None)
-            }
+            None => (None, None, line.to_owned(), None, None),
         };
         let needed = 1 + usize::from(rendered.0.is_some()) + usize::from(rendered.1.is_some());
-        if out.len() + needed > options.max_lines {
+        // Once a line is left out, so is every later one: nothing is shown out of place.
+        if omitted > 0 || out.len() + needed > options.max_lines {
             omitted += 1;
             if let Some(path) = rendered.3 {
                 omitted_paths.insert(path.to_owned());
             }
             continue;
         }
+        current = rendered.3;
+        scope = rendered.4;
         if let Some(header) = rendered.0 {
             out.push(header);
         }
@@ -580,6 +580,22 @@ mod tests {
         );
         assert!(dense.contains("## a.txt 52-73\n"), "{dense}");
         assert!(!dense.contains("## a.txt 1-"), "{dense}");
+    }
+
+    #[test]
+    fn once_a_line_is_left_out_no_later_line_shows_under_the_wrong_file() {
+        let input = "a.rs:1:x\na.rs:2:y\nb.rs:1:z\na.rs:3:w\n";
+        let out = compact(
+            input,
+            CompactOptions {
+                max_lines: 3,
+                ..CompactOptions::default()
+            },
+        );
+        assert_eq!(
+            out,
+            "a.rs\n1:x\n2:y\n... 2 more lines in 2 files not shown; narrow the search\n"
+        );
     }
 
     #[test]

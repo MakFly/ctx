@@ -190,9 +190,12 @@ enum Command {
         /// Token budget for matched definition bodies and the lines around other matches (0 disables it).
         #[arg(long, default_value_t = 1_500)]
         expand_tokens: usize,
-        /// Exit 1 when the input is empty, as a search with no match does.
-        #[arg(long)]
-        fail_empty: bool,
+        /// Run this search and compact its output, exiting with its status.
+        #[arg(long, requires = "search")]
+        run: bool,
+        /// The search to run with `--run`.
+        #[arg(last = true, id = "search")]
+        search: Vec<String>,
     },
     /// Receive a harness lifecycle event and enqueue background work.
     Hook {
@@ -935,12 +938,24 @@ async fn execute(cli: Cli) -> Result<()> {
             max_lines,
             max_line_chars,
             expand_tokens,
-            fail_empty,
+            run,
+            search,
         } => {
             let mut input = String::new();
-            io::stdin().read_to_string(&mut input)?;
-            if fail_empty && input.trim().is_empty() {
-                std::process::exit(1);
+            let mut status = None;
+            if run {
+                // The search keeps the caller's stdin and stderr; only its output is compacted.
+                let (program, arguments) = search.split_first().context("--run needs a search")?;
+                let output = std::process::Command::new(program)
+                    .args(arguments)
+                    .stdin(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .output()
+                    .with_context(|| format!("cannot run {program}"))?;
+                input = String::from_utf8_lossy(&output.stdout).into_owned();
+                status = Some(output.status.code().unwrap_or(1));
+            } else {
+                io::stdin().read_to_string(&mut input)?;
             }
             print!(
                 "{}",
@@ -954,6 +969,10 @@ async fn execute(cli: Cli) -> Result<()> {
                     }
                 )
             );
+            if let Some(code) = status {
+                io::stdout().flush()?;
+                std::process::exit(code);
+            }
             Ok(())
         }
         Command::Hook { command } => execute_hook(command),

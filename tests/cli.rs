@@ -781,3 +781,37 @@ fn read_raw_lines_match_the_file_and_outline_lists_definitions() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("  5-7 def login("), "{text}");
 }
+
+#[test]
+fn compact_run_keeps_the_search_status_and_compacts_its_output() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    let found = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args([
+            "compact", "--run", "--", "grep", "-H", "-n", "beta", "a.txt",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(found.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&found.stdout).starts_with("a.txt\n2:beta\n"));
+    // No match: grep's own status 1, not compact's success.
+    let missing = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args([
+            "compact", "--run", "--", "grep", "-H", "-n", "gamma", "a.txt",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+    // `-q` prints nothing yet succeeds: the status still follows the search.
+    let quiet = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-q", "beta", "a.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(quiet.status.code(), Some(0));
+}
