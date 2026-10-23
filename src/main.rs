@@ -408,6 +408,9 @@ enum HookCommand {
     CompactOutput {
         #[arg(long)]
         harness: String,
+        /// Token budget for the source appended to the compacted result.
+        #[arg(long)]
+        expand_tokens: Option<usize>,
     },
 }
 
@@ -1524,13 +1527,22 @@ fn execute_hook(command: HookCommand) -> Result<()> {
             }
             Ok(())
         }
-        HookCommand::CompactOutput { harness } => {
+        HookCommand::CompactOutput {
+            harness,
+            expand_tokens,
+        } => {
             let mut body = String::new();
             let response = io::stdin()
                 .read_to_string(&mut body)
                 .ok()
                 .and_then(|_| serde_json::from_str::<Value>(&body).ok())
-                .and_then(|payload| ctx_code::hook_rewrite::post_tool_response(&payload, &harness));
+                .and_then(|payload| {
+                    ctx_code::hook_rewrite::post_tool_response_with(
+                        &payload,
+                        &harness,
+                        expand_tokens,
+                    )
+                });
             if let Some(response) = response {
                 println!("{response}");
             }

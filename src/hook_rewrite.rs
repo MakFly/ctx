@@ -651,6 +651,15 @@ fn scan_word(text: &str, start: usize) -> Option<(String, usize)> {
 /// PostToolUse response that compacts a Grep `content` result (Claude), keeping the
 /// tool's output shape; `None` when there is nothing to gain.
 pub fn post_tool_response(payload: &Value, harness: &str) -> Option<Value> {
+    post_tool_response_with(payload, harness, None)
+}
+
+/// [`post_tool_response`] with the token budget for the appended source.
+pub fn post_tool_response_with(
+    payload: &Value,
+    harness: &str,
+    expand_tokens: Option<usize>,
+) -> Option<Value> {
     if harness != "claude" || payload.get("tool_name")?.as_str()? != "Grep" {
         return None;
     }
@@ -701,7 +710,7 @@ pub fn post_tool_response(payload: &Value, harness: &str) -> Option<Value> {
         None => content,
     };
     let options = crate::compact::CompactOptions {
-        expand_tokens: EXPAND_TOKENS,
+        expand_tokens: expand_tokens.unwrap_or(EXPAND_TOKENS),
         root,
         ..crate::compact::CompactOptions::default()
     };
