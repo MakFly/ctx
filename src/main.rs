@@ -1425,7 +1425,7 @@ fn print_operations(report: &ctx_code::metrics::MetricsReport) {
             format_duration(operation.duration_ms),
         );
         match share {
-            Some(share) => println!("  {row}  {}", paint(bar(share, 12), "32")),
+            Some(share) => println!("  {row}  {}", bar(share, 12)),
             None => println!("  {}", paint(row, "2")),
         }
     }
@@ -1484,22 +1484,29 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// `[####....] 96.2%` for a share in percent; a negative share stays empty.
+/// A bar of `width` cells and its share in percent; a negative share leaves the
+/// track empty and shows the percent in yellow.
 fn share_bar(percent: f64, width: usize) -> String {
-    let color = if percent < 0.0 { "33" } else { "32" };
+    let label = if percent < 0.0 { "33" } else { "2" };
     format!(
-        "{} {}",
-        paint(bar(percent, width), color),
-        paint(format!("{percent:.1}%"), "2")
+        "{}  {}",
+        bar(percent, width),
+        paint(format!("{percent:.1}%"), label)
     )
 }
 
+/// A heavy green line over a thin dim track: `━━━━━━────`.
 fn bar(percent: f64, width: usize) -> String {
     let filled = (width as f64 * percent.clamp(0.0, 100.0) / 100.0).round() as usize;
-    format!(
-        "{}{}",
-        "#".repeat(filled),
-        ".".repeat(width.saturating_sub(filled))
-    )
+    let track = width.saturating_sub(filled);
+    let mut text = String::new();
+    if filled > 0 {
+        text.push_str(&paint("━".repeat(filled), "32"));
+    }
+    if track > 0 {
+        text.push_str(&paint("─".repeat(track), "2"));
+    }
+    text
 }
 
 fn group_digits(value: u64) -> String {

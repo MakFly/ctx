@@ -188,7 +188,7 @@ fn import_bench_reports_negative_measured_savings_and_is_idempotent() {
         .unwrap();
     assert!(line.starts_with("  500  "), "{line}");
     assert!(text.contains("against 2.2K input tokens without ctx, measured over 2 pairs"));
-    assert!(text.contains(&format!("  {} -22.7%\n", ".".repeat(40))));
+    assert!(text.contains(&format!("  {}  -22.7%\n", "─".repeat(40))));
 
     let output = metrics_cli(root).args(["gain", "--json"]).output().unwrap();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
