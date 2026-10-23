@@ -107,8 +107,10 @@ worker skips indexing when the MCP watcher owns the writer lock; otherwise it
 runs the existing incremental indexer. The writer lock remains the authority
 against concurrent publications.
 
-**Publication.** SQLite schema version and `text_index::FORMAT` currently are
-both `4`, but they describe separate compatibility boundaries. SQLite's
+**Publication.** SQLite schema version is `5` and `text_index::FORMAT` is `4`;
+they describe separate compatibility boundaries. Schema 5 adds the nullable
+`edges.dst_module` column through an additive migration, and the `graph_format`
+meta (`2`) forces one graph refresh when the parser's edge model changes. SQLite's
 `text_generation` points to immutable files under the effective `CTX_DIR/text/`.
 `stage_generation` reads the same SQLite transaction as the graph update, writes
 and synchronizes a new generation, then records its reference in that transaction.
@@ -214,6 +216,21 @@ changes are needed. Only formatting, offline Cargo metadata and static review
 were authorized for this follow-up; compilation and runtime tests have not run.
 See [the recovery evidence](STORAGE_RECOVERY.md) for measured WAL recovery,
 dependency EOF behavior, remaining limits and the unexecuted regression case.
+
+### Freshness, graph and LSP follow-ups (2026-10-23)
+
+`watcher::index_drift` is the single admitted-tree freshness check: it counts
+added, modified (by `file_version`) and removed files. `evidence_stale` and
+`ctx status` (`stale`, `drift`) both use it. Calls through renamed imports keep
+the imported name and module in `edges.dst_module`; resolution prefers a
+unique same-file definition, then the imported module, then a unique global
+one, and leaves other homonyms unbound with partial coverage. Edge sources are
+attributed by the innermost enclosing symbol of that name. LSP enrichment
+records `indexed_at` before reading symbols and replaces a language's LSP
+edges in one `BEGIN IMMEDIATE` transaction that re-checks it, returning
+`stale_index` instead of storing over a newer publication. All passed with
+`cargo test --workspace --all-targets --locked` on 2026-10-23. Not handled:
+tsconfig path aliases, re-export chains, default imports.
 
 ### Disk floor (2026-10-23)
 

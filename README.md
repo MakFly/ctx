@@ -158,6 +158,8 @@ This is not an atomic filesystem snapshot. Pending structural updates and detect
 read races produce partial coverage. Changes preserving every observable file
 version attribute require `ctx index . --force` or forced watcher reconciliation.
 `ctx status --json` reports generation, watcher, pending-work and exclusion data.
+`stale` covers added, modified and deleted admitted files; `drift` gives the
+counts.
 
 ## Languages and file limits
 

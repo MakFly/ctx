@@ -12,6 +12,9 @@
   digest, an asset name that is not a plain file name, a download URL outside
   the server's own GitHub releases, and assets above 256 MiB. Downloads stream
   to disk and the Python wheel must be a `basedpyright-*.whl`.
+- `ctx install` and `ctx update` refuse destinations whose canonical target
+  leaves the project (symlinked files or directories), write atomically, and
+  keep in-project symlinks and file permissions.
 
 ### Fixed
 
@@ -19,6 +22,18 @@
   512 MiB, `0` disables) free space on the index disk, it aborts without
   publishing, keeps the previous index and truncates the WAL.
 - MCP server instructions again tell agents to answer from the hits.
+- `ctx status` reports new and deleted admitted files: `stale` now uses the
+  watcher's drift check and a `drift` object gives added, modified and
+  removed counts.
+- The static graph follows renamed imports (`import { foo as bar }`,
+  `from m import foo as bar`, `use a::foo as bar`), prefers same-file then
+  imported definitions for homonyms, keeps same-name methods of one file
+  apart, and reports `partial` coverage for unresolved homonyms. Schema 5;
+  existing indexes migrate and refresh their graph once.
+- LSP enrichment stores each language atomically and reports `stale_index`
+  instead of writing over a newer index publication.
+- Reindex requests and metrics events are no longer lost when queued during
+  a drain, and snapshots left by a crashed worker are replayed.
 
 ## 0.3.0 - 2026-09-15
 
