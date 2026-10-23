@@ -1181,3 +1181,29 @@ fn compact_run_keeps_a_nul_ending_matched_text_and_passes_unnumbered_rg_through(
         assert_eq!(through.stdout, direct.stdout, "{flag}");
     }
 }
+
+#[test]
+fn hook_install_and_uninstall_touch_only_the_given_home() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+    let run = |verb: &str| {
+        Command::cargo_bin("ctx")
+            .unwrap()
+            .env("HOME", "/nonexistent-ctx-home")
+            .args(["hook", verb, "--home"])
+            .arg(home.path())
+            .output()
+            .unwrap()
+    };
+    let installed = run("install");
+    assert!(installed.status.success());
+    let stdout = String::from_utf8_lossy(&installed.stdout);
+    assert!(stdout.contains("codex: ajouté"), "{stdout}");
+    assert!(stdout.contains("claude: ignoré"), "{stdout}");
+    let hooks = std::fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
+    assert!(hooks.contains("ctx hook rewrite --harness codex"));
+    let removed = run("uninstall");
+    assert!(String::from_utf8_lossy(&removed.stdout).contains("codex: retiré"));
+    let hooks = std::fs::read_to_string(home.path().join(".codex/hooks.json")).unwrap();
+    assert_eq!(hooks.trim(), "{}");
+}

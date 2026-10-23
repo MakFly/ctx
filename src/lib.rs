@@ -4,6 +4,7 @@ pub mod compact;
 pub mod config;
 pub mod db;
 pub mod gitinfo;
+pub mod global_hooks;
 pub mod graph;
 pub mod harness;
 pub mod hook_rewrite;

@@ -603,16 +603,21 @@ pub fn hook_response_with(
     harness: &str,
     expand_tokens: Option<usize>,
 ) -> Option<Value> {
-    if !matches!(harness, "claude" | "codex") {
+    // Grok sends camelCase `toolName`/`toolInput` and names its shell tool
+    // `run_terminal_command`; Claude and Codex send `tool_name`/`tool_input`.
+    let (name_key, input_key, tools): (_, _, &[&str]) = match harness {
+        "claude" | "codex" => (
+            "tool_name",
+            "tool_input",
+            &["Bash", "shell", "exec_command"],
+        ),
+        "grok" => ("toolName", "toolInput", &["run_terminal_command"]),
+        _ => return None,
+    };
+    if !tools.contains(&payload.get(name_key)?.as_str()?) {
         return None;
     }
-    if !matches!(
-        payload.get("tool_name")?.as_str()?,
-        "Bash" | "shell" | "exec_command"
-    ) {
-        return None;
-    }
-    let tool_input = payload.get("tool_input")?.as_object()?;
+    let tool_input = payload.get(input_key)?.as_object()?;
     // Bash and shell send `command`; exec_command sends `cmd`: the same field is rewritten.
     let field = ["command", "cmd"]
         .into_iter()
@@ -882,6 +887,24 @@ mod tests {
             rewrite_command("cd src && rg -n foo", cwd).unwrap(),
             "cd src && ctx compact --run -- rg -n foo"
         );
+    }
+
+    #[test]
+    fn grok_payloads_are_camel_case_and_get_no_allow() {
+        let grok = json!({"toolName": "run_terminal_command", "cwd": "/",
+            "toolInput": {"command": "rg foo", "timeout": 5}});
+        let out = hook_response(&grok, "grok").unwrap();
+        let output = &out["hookSpecificOutput"];
+        assert_eq!(
+            output["updatedInput"]["command"],
+            "ctx compact --run -- rg foo"
+        );
+        assert_eq!(output["updatedInput"]["timeout"], 5);
+        assert!(output.get("permissionDecision").is_none());
+        // Grok also runs the Claude hooks of ~/.claude/settings.json: they decline its payload.
+        assert!(hook_response(&grok, "claude").is_none());
+        let snake = json!({"tool_name": "Bash", "cwd": "/", "tool_input": {"command": "rg foo"}});
+        assert!(hook_response(&snake, "grok").is_none());
     }
 
     #[test]
