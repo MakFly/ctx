@@ -50,11 +50,27 @@ pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {
             return None;
         }
         if is_search(program, arguments) {
+            // Output without a path on each line is not what ctx compact reads.
+            if arguments
+                .iter()
+                .any(|argument| matches!(argument.as_str(), "--heading" | "--no-filename" | "-h"))
+            {
+                return None;
+            }
             searched = true;
-            // `-H` prints the path even for a single file, so the lines parse and
-            // the source around them can be appended.
+            // `-H -n` print the path and line number on every line, even for one file,
+            // so the lines parse and the source around them can be appended.
+            let numbered = arguments.iter().any(|argument| {
+                argument == "--line-number"
+                    || (argument.starts_with('-')
+                        && !argument.starts_with("--")
+                        && argument.contains('n'))
+            });
             words.push(program.clone());
             words.push("-H".to_owned());
+            if !numbered {
+                words.push("-n".to_owned());
+            }
             words.extend(arguments.iter().cloned());
         } else if is_plain_read(&step) {
             words.extend(step.iter().cloned());
@@ -757,7 +773,7 @@ mod tests {
             // Inside double quotes `\$` is a literal `$`, kept so by the requoted word.
             (
                 "grep -F \"\\$HOME\" a.rs",
-                "ctx compact --run -- grep -H -F '$HOME' a.rs",
+                "ctx compact --run -- grep -H -n -F '$HOME' a.rs",
             ),
             // zsh expands a bare leading `=` to a program path.
             ("rg -n x '=ls'", "ctx compact --run -- rg -H -n x '=ls'"),
@@ -789,7 +805,7 @@ mod tests {
         let out = hook_response(&exec, "codex").unwrap();
         assert_eq!(
             out["hookSpecificOutput"]["updatedInput"]["cmd"],
-            "ctx compact --run -- rg -H foo"
+            "ctx compact --run -- rg -H -n foo"
         );
         assert!(
             out["hookSpecificOutput"]["updatedInput"]
@@ -853,6 +869,9 @@ mod tests {
             "git grep --open-files-in-pag=printf foo",
             "rg foo ~/x",
             "rg --glob=~/x foo",
+            "rg --heading foo",
+            "rg -h foo",
+            "grep --no-filename -r foo .",
             "rg =ls",
             "rg foo\u{a0}",
             "rg\u{a0}foo",
@@ -1017,7 +1036,7 @@ mod tests {
         let out = hook_response_with(&payload, "codex", Some(600)).unwrap();
         assert_eq!(
             out["hookSpecificOutput"]["updatedInput"]["command"],
-            "ctx compact --expand-tokens 600 --run -- rg -H foo"
+            "ctx compact --expand-tokens 600 --run -- rg -H -n foo"
         );
     }
 

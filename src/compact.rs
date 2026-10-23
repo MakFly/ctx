@@ -31,6 +31,8 @@ impl Default for CompactOptions {
 
 /// Largest single definition body shown in full, in tokens.
 const MAX_BODY_TOKENS: usize = 700;
+/// Tokens kept for the line that says a body was cut.
+const ELIDED_TOKENS: usize = 8;
 /// Lines shown before a match, and after a lone one.
 const WINDOW_BEFORE: usize = 8;
 const WINDOW_AFTER: usize = 30;
@@ -215,7 +217,10 @@ fn expand_definitions(
         let mut cut = None;
         for number in from..=to {
             let text = format!("{number}\t{}\n", lines[number - 1]);
-            if estimate_tokens(&block) + estimate_tokens(&text) > MAX_BODY_TOKENS.min(room) {
+            // Room is kept for the `... A-B elided` line, so a cut body still fits.
+            if estimate_tokens(&block) + estimate_tokens(&text) + ELIDED_TOKENS
+                > MAX_BODY_TOKENS.min(room)
+            {
                 cut = Some(number);
                 break;
             }
@@ -275,8 +280,31 @@ fn expand_definitions(
 }
 
 /// One parsed `path:line:text` match line, or a `path-line-text` context line.
+#[cfg(test)]
 fn parse(line: &str) -> Option<(&str, &str, char, &str)> {
-    parse_with(line, ':').or_else(|| parse_with(line, '-'))
+    parse_in(line, None, None)
+}
+
+/// As [`parse`], choosing between the `path:N:` and `path-N-` readings of an ambiguous
+/// line (`a.rs-1-t = "10:20"`): the one naming the file being listed, else a file that
+/// exists under `root`, else the one whose delimiter comes first.
+fn parse_in<'a>(
+    line: &'a str,
+    current: Option<&str>,
+    root: Option<&Path>,
+) -> Option<(&'a str, &'a str, char, &'a str)> {
+    let readings: Vec<_> = [parse_with(line, ':'), parse_with(line, '-')]
+        .into_iter()
+        .flatten()
+        .collect();
+    readings
+        .iter()
+        .find(|(path, ..)| Some(*path) == current)
+        .or_else(|| {
+            root.and_then(|root| readings.iter().find(|(path, ..)| root.join(path).is_file()))
+        })
+        .or_else(|| readings.iter().min_by_key(|(path, ..)| path.len()))
+        .copied()
 }
 
 /// Splits at the first `<sep><digits><sep>` after a non-empty path (a match line
@@ -337,12 +365,12 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
         // Once a line is left out, so is every later one: count it, read nothing for it.
         if omitted > 0 {
             omitted += 1;
-            if let Some((path, ..)) = parse(line) {
+            if let Some((path, ..)) = parse_in(line, current, options.root.as_deref()) {
                 omitted_paths.insert(path.to_owned());
             }
             continue;
         }
-        let rendered = match parse(line) {
+        let rendered = match parse_in(line, current, options.root.as_deref()) {
             Some((path, number, separator, text)) => {
                 // Kept for the expansion only once the line is shown.
                 let found = (separator == ':')
@@ -594,8 +622,44 @@ mod tests {
                 ..options
             },
         );
-        assert!(dense.contains("## a.txt 52-73\n"), "{dense}");
-        assert!(!dense.contains("## a.txt 1-"), "{dense}");
+        assert!(dense.contains("## a.txt 52-73\n52\tline 52\n"), "{dense}");
+        // The lone match only gets what budget is left: cut, and said so.
+        assert!(
+            dense.contains("## a.txt 1-32\n") && dense.contains("elided"),
+            "{dense}"
+        );
+    }
+
+    #[test]
+    fn a_context_line_holding_colons_stays_with_its_file() {
+        let input = "a.rs:1:let s = 1;\na.rs-2-let t = \"10:20:30\";\n";
+        assert_eq!(
+            compact(input, CompactOptions::default()),
+            "a.rs\n1:let s = 1;\n2-let t = \"10:20:30\";\n"
+        );
+    }
+
+    #[test]
+    fn a_cut_body_still_fits_the_budget_it_was_cut_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=200)
+            .map(|n| format!("    let value_{n} = {n};\n"))
+            .collect();
+        std::fs::write(dir.path().join("a.rs"), format!("fn long() {{\n{body}}}\n")).unwrap();
+        for budget in [60, 120, 300, 600] {
+            let out = compact(
+                "a.rs:1:fn long() {\n",
+                CompactOptions {
+                    expand_tokens: budget,
+                    root: Some(dir.path().to_path_buf()),
+                    ..CompactOptions::default()
+                },
+            );
+            assert!(
+                out.contains("function long") && out.contains("elided"),
+                "{budget}: {out}"
+            );
+        }
     }
 
     #[test]
