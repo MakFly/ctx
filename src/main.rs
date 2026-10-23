@@ -15,6 +15,7 @@ use ctx_code::harness::{install, installation_plan};
 use ctx_code::indexer::IndexProgress;
 use ctx_code::map::build_map;
 use ctx_code::model::Envelope;
+use ctx_code::output::{render_envelope_text, render_json};
 use ctx_code::pack::pack_query;
 use ctx_code::read::{ReadOptions, read_file, render_read_notes, render_read_text};
 use ctx_code::runner::{RunOptions, run_question};
@@ -750,8 +751,17 @@ async fn execute(cli: Cli) -> Result<()> {
             limit,
             budget_tokens,
             json,
-        } => emit_envelope(
-            &search_index_with_options(
+        } => {
+            let line_filter = match mode {
+                SearchMode::Literal => {
+                    Some(ctx_code::text_index::matcher(&query, true, ignore_case)?)
+                }
+                SearchMode::Regex => {
+                    Some(ctx_code::text_index::matcher(&query, false, ignore_case)?)
+                }
+                _ => None,
+            };
+            let envelope = search_index_with_options(
                 &query,
                 mode.as_str(),
                 ignore_case,
@@ -759,9 +769,9 @@ async fn execute(cli: Cli) -> Result<()> {
                 limit.max(1),
                 budget_tokens.max(1),
                 ".",
-            )?,
-            json,
-        ),
+            )?;
+            emit_envelope(&envelope, json, line_filter.as_ref())
+        }
         Command::Graph {
             op,
             symbol,
@@ -770,6 +780,7 @@ async fn execute(cli: Cli) -> Result<()> {
         } => emit_envelope(
             &graph_query(op.as_str(), &symbol, depth.max(1), 1_500, ".")?,
             json,
+            None,
         ),
         Command::Pack {
             query,
@@ -779,6 +790,7 @@ async fn execute(cli: Cli) -> Result<()> {
         } => emit_envelope(
             &pack_query(&query, budget_tokens.max(1), intent.as_str(), ".")?,
             json,
+            None,
         ),
         Command::Map { out, json } => {
             let value = build_map(".")?;
@@ -1618,28 +1630,20 @@ fn execute_harness(mode: &str, arguments: HarnessArgs) -> Result<()> {
     Ok(())
 }
 
-fn emit_envelope(value: &Envelope, as_json: bool) -> Result<()> {
+fn emit_envelope(
+    value: &Envelope,
+    as_json: bool,
+    line_filter: Option<&regex::Regex>,
+) -> Result<()> {
     if as_json {
-        return emit(value, true);
+        println!("{}", render_json(value, io::stdout().is_terminal())?);
+        return Ok(());
     }
-    for hit in &value.hits {
-        println!(
-            "{}:{} {} {}: {}",
-            hit.path,
-            hit.start,
-            hit.kind,
-            hit.symbol.as_deref().unwrap_or_default(),
-            hit.why
-        );
-    }
-    println!(
-        "{} tokens; coverage={}; {}ms",
-        value.tokens, value.coverage, value.freshness_ms
-    );
+    println!("{}", render_envelope_text(value, line_filter));
     Ok(())
 }
 
 fn emit(value: &impl Serialize, _as_json: bool) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
+    println!("{}", render_json(value, io::stdout().is_terminal())?);
     Ok(())
 }

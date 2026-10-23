@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- Text output for `ctx search`, `ctx graph` and `ctx pack` now groups hits by
+  file, prints compact source evidence and reports the printed-token estimate.
+  JSON output is compact when stdout is piped and remains pretty in a terminal.
+
 ### Security
 
 - `ctx_pack` expansion (`expand <path>:<start>-<end>`) now accepts only indexed
@@ -39,7 +45,7 @@
 
 ### Added
 
-- RTK-style global and project metrics dashboards with ANSI terminal colors.
+- Global and project metrics dashboards with ANSI terminal colors.
 - Per-operation counts, context tokens, duration, efficiency and savings.
 - Exact no-ctx baseline pairing for `ctx run` measurements.
 - Estimated MCP savings based on cited source files.

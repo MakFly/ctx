@@ -57,6 +57,15 @@ Use `--ignore-case` with literal or regex mode for Unicode case folding. Regexes
 support inline flags, including multiline and dot-all; lookarounds and
 backreferences are unsupported. Ranked queries are not interpreted as regexes.
 
+Text output groups evidence by file and prints numbered source lines:
+
+```text
+src/auth.py
+42: def login(user):
+43:     return users.find(user)
+1 hits in 1 files; ~17 tokens printed; coverage=complete
+```
+
 ```console
 ctx search 'Vec<T>' --mode literal --budget-tokens 1500 --json
 ctx search '(?s)start.*finish' --mode regex --json

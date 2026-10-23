@@ -23,6 +23,10 @@ pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {
         Some(directory) => cwd.join(directory),
         None => cwd.to_path_buf(),
     };
+    // A `cd` into a directory that does not exist fails in the shell: leave it alone.
+    if directory.is_some() && !effective.is_dir() {
+        return None;
+    }
     let tokens = tokenize(rest)?;
     let (program, arguments) = tokens.split_first()?;
     let rewritten = match program.as_str() {
@@ -76,6 +80,10 @@ fn rewrite_search(arguments: &[String], cwd: &Path, tool: SearchTool) -> Option<
     let mut positional = Vec::new();
     for argument in arguments {
         if argument.len() > 1 && argument.starts_with('-') {
+            // A flag after the pattern is still a flag to the tool, not a path.
+            if !positional.is_empty() {
+                return None;
+            }
             for flag in argument[1..].chars() {
                 match (tool, flag) {
                     (_, 'n') => {}

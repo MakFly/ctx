@@ -12,6 +12,7 @@ pub mod map;
 pub mod mcp;
 pub mod metrics;
 pub mod model;
+pub mod output;
 pub mod pack;
 pub mod parser;
 pub mod read;

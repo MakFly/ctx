@@ -246,6 +246,37 @@ fn cli_indexes_and_searches_with_json_envelope() {
 }
 
 #[test]
+fn literal_search_text_includes_the_matched_line_and_groups_by_path() {
+    let (_temporary, root) = fixture();
+    let indexed = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(&root)
+        .args(["index"])
+        .output()
+        .unwrap();
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(&root)
+        .args(["search", "return auth.login(username)", "--mode", "literal"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("return auth.login(username)"));
+    assert_eq!(text.matches("app.py").count(), 1);
+}
+
+#[test]
 fn status_reports_index_drift_for_admitted_file_changes() {
     let (_temporary, root) = fixture();
     let index = || {
