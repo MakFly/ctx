@@ -832,5 +832,5 @@ fn read_raw_lines_match_the_file_and_outline_lists_definitions() {
         .unwrap();
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("AuthService.login"), "{text}");
+    assert!(text.contains("  5-7 def login("), "{text}");
 }
