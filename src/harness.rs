@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -32,6 +34,7 @@ const CLAUDE_AGENT: &str = include_str!("../agents/claude/ctx-explorer.md");
 const CODEX_AGENT: &str = include_str!("../agents/codex/ctx-explorer.toml");
 const CURSOR_AGENT: &str = include_str!("../agents/cursor/ctx-explorer.md");
 const OPENCODE_AGENT: &str = include_str!("../agents/opencode/ctx-explorer.md");
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Detection {
@@ -150,14 +153,18 @@ pub fn install(root: &Path, target: &str, mode: &str) -> Result<Vec<PathBuf>> {
     let mut installed = Vec::new();
     for target in &selected {
         if let Some(directory) = skill_directory(target) {
-            installed.extend(copy_skill(&root.join(directory))?);
+            installed.extend(copy_skill(root, &root.join(directory))?);
         }
     }
     if selected.contains("claude") {
-        write(root.join(".claude/agents/ctx-explorer.md"), CLAUDE_AGENT)?;
-        install_json_mcp(&root.join(".mcp.json"))?;
-        install_claude_metrics_hooks(&root.join(".claude/settings.json"))?;
-        append_once(&root.join("CLAUDE.md"), CLAUDE_SNIPPET)?;
+        write(
+            root,
+            root.join(".claude/agents/ctx-explorer.md"),
+            CLAUDE_AGENT,
+        )?;
+        install_json_mcp(root, &root.join(".mcp.json"))?;
+        install_claude_metrics_hooks(root, &root.join(".claude/settings.json"))?;
+        append_once(root, &root.join("CLAUDE.md"), CLAUDE_SNIPPET)?;
         installed.extend([
             root.join(".claude/agents/ctx-explorer.md"),
             root.join(".mcp.json"),
@@ -166,9 +173,13 @@ pub fn install(root: &Path, target: &str, mode: &str) -> Result<Vec<PathBuf>> {
         ]);
     }
     if selected.contains("codex") {
-        write(root.join(".codex/agents/ctx-explorer.toml"), CODEX_AGENT)?;
-        install_codex_mcp(&root.join(".codex/config.toml"))?;
-        append_once(&root.join("AGENTS.md"), AGENTS_SNIPPET)?;
+        write(
+            root,
+            root.join(".codex/agents/ctx-explorer.toml"),
+            CODEX_AGENT,
+        )?;
+        install_codex_mcp(root, &root.join(".codex/config.toml"))?;
+        append_once(root, &root.join("AGENTS.md"), AGENTS_SNIPPET)?;
         installed.extend([
             root.join(".codex/agents/ctx-explorer.toml"),
             root.join(".codex/config.toml"),
@@ -177,25 +188,30 @@ pub fn install(root: &Path, target: &str, mode: &str) -> Result<Vec<PathBuf>> {
     }
     if selected.contains("grok") {
         let config = root.join(".grok/config.toml");
-        install_grok_mcp(&config)?;
-        append_once(&root.join("AGENTS.md"), AGENTS_SNIPPET)?;
+        install_grok_mcp(root, &config)?;
+        append_once(root, &root.join("AGENTS.md"), AGENTS_SNIPPET)?;
         installed.extend([config, root.join("AGENTS.md")]);
     }
     if selected.contains("opencode") {
         write(
+            root,
             root.join(".opencode/agents/ctx-explorer.md"),
             OPENCODE_AGENT,
         )?;
-        install_opencode_mcp(&root.join("opencode.json"))?;
+        install_opencode_mcp(root, &root.join("opencode.json"))?;
         installed.extend([
             root.join(".opencode/agents/ctx-explorer.md"),
             root.join("opencode.json"),
         ]);
     }
     if selected.contains("cursor") {
-        write(root.join(".cursor/agents/ctx-explorer.md"), CURSOR_AGENT)?;
-        install_json_mcp(&root.join(".cursor/mcp.json"))?;
-        install_cursor_metrics_hooks(&root.join(".cursor/hooks.json"))?;
+        write(
+            root,
+            root.join(".cursor/agents/ctx-explorer.md"),
+            CURSOR_AGENT,
+        )?;
+        install_json_mcp(root, &root.join(".cursor/mcp.json"))?;
+        install_cursor_metrics_hooks(root, &root.join(".cursor/hooks.json"))?;
         installed.extend([
             root.join(".cursor/agents/ctx-explorer.md"),
             root.join(".cursor/mcp.json"),
@@ -290,17 +306,17 @@ fn skill_directory(target: &str) -> Option<&'static str> {
     }
 }
 
-fn copy_skill(destination: &Path) -> Result<Vec<PathBuf>> {
+fn copy_skill(root: &Path, destination: &Path) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
     for (relative, content) in SKILL_FILES {
         let path = destination.join(relative);
-        write(path.clone(), content)?;
+        write(root, path.clone(), content)?;
         written.push(path);
     }
     Ok(written)
 }
 
-fn append_once(path: &Path, snippet: &str) -> Result<()> {
+fn append_once(root: &Path, path: &Path, snippet: &str) -> Result<()> {
     let current = read_existing(path)?;
     let block = format!("{BEGIN}\n{}\n{END}", snippet.trim_end());
     let updated = match (current.find(BEGIN), current.find(END)) {
@@ -319,7 +335,7 @@ fn append_once(path: &Path, snippet: &str) -> Result<()> {
         _ if current.trim().is_empty() => format!("{block}\n"),
         _ => format!("{}\n\n{block}\n", current.trim_end()),
     };
-    write(path.to_path_buf(), &updated)
+    write(root, path.to_path_buf(), &updated)
 }
 
 fn load_json(path: &Path) -> Result<Map<String, Value>> {
@@ -334,8 +350,9 @@ fn load_json(path: &Path) -> Result<Map<String, Value>> {
         .with_context(|| format!("la racine JSON doit être un objet: {}", path.display()))
 }
 
-fn write_json(path: &Path, value: &Map<String, Value>) -> Result<()> {
+fn write_json(root: &Path, path: &Path, value: &Map<String, Value>) -> Result<()> {
     write(
+        root,
         path.to_path_buf(),
         &format!(
             "{}\n",
@@ -344,7 +361,7 @@ fn write_json(path: &Path, value: &Map<String, Value>) -> Result<()> {
     )
 }
 
-fn install_json_mcp(path: &Path) -> Result<()> {
+fn install_json_mcp(root: &Path, path: &Path) -> Result<()> {
     let mut config = load_json(path)?;
     let servers = config
         .entry("mcpServers")
@@ -355,10 +372,10 @@ fn install_json_mcp(path: &Path) -> Result<()> {
         "ctx".to_owned(),
         json!({"type": "stdio", "command": "ctx", "args": ["mcp"]}),
     );
-    write_json(path, &config)
+    write_json(root, path, &config)
 }
 
-fn install_claude_metrics_hooks(path: &Path) -> Result<()> {
+fn install_claude_metrics_hooks(root: &Path, path: &Path) -> Result<()> {
     let mut config = load_json(path)?;
     let hooks = config
         .entry("hooks")
@@ -393,10 +410,10 @@ fn install_claude_metrics_hooks(path: &Path) -> Result<()> {
             }));
         }
     }
-    write_json(path, &config)
+    write_json(root, path, &config)
 }
 
-fn install_cursor_metrics_hooks(path: &Path) -> Result<()> {
+fn install_cursor_metrics_hooks(root: &Path, path: &Path) -> Result<()> {
     let mut config = load_json(path)?;
     config.entry("version").or_insert_with(|| json!(1));
     let hooks = config
@@ -420,10 +437,10 @@ fn install_cursor_metrics_hooks(path: &Path) -> Result<()> {
             entries.push(json!({"command": command}));
         }
     }
-    write_json(path, &config)
+    write_json(root, path, &config)
 }
 
-fn install_opencode_mcp(path: &Path) -> Result<()> {
+fn install_opencode_mcp(root: &Path, path: &Path) -> Result<()> {
     let mut config = load_json(path)?;
     config
         .entry("$schema")
@@ -455,10 +472,10 @@ fn install_opencode_mcp(path: &Path) -> Result<()> {
             json!({"type": "local", "command": ["ctx", "mcp"], "enabled": true}),
         );
     }
-    write_json(path, &config)
+    write_json(root, path, &config)
 }
 
-fn install_codex_mcp(path: &Path) -> Result<()> {
+fn install_codex_mcp(root: &Path, path: &Path) -> Result<()> {
     let current = read_existing(path)?;
     let mut lines = current.lines().map(str::to_owned).collect::<Vec<_>>();
     if let Some(start) = lines
@@ -482,10 +499,10 @@ fn install_codex_mcp(path: &Path) -> Result<()> {
     );
     toml_edit::DocumentMut::from_str(&text)
         .with_context(|| format!("TOML invalide, installation annulée: {}", path.display()))?;
-    write(path.to_path_buf(), &text)
+    write(root, path.to_path_buf(), &text)
 }
 
-fn install_grok_mcp(path: &Path) -> Result<()> {
+fn install_grok_mcp(root: &Path, path: &Path) -> Result<()> {
     let current = read_existing(path)?;
     let mut document = DocumentMut::from_str(&current)
         .with_context(|| format!("TOML invalide, installation annulée: {}", path.display()))?;
@@ -507,7 +524,7 @@ fn install_grok_mcp(path: &Path) -> Result<()> {
     ctx.insert("enabled", value(true));
     ctx.insert("startup_timeout_sec", value(30));
     ctx.insert("tool_timeout_sec", value(6000));
-    write(path.to_path_buf(), &document.to_string())
+    write(root, path.to_path_buf(), &document.to_string())
 }
 
 fn ensure_ctx_gitignore(root: &Path) -> Result<()> {
@@ -524,7 +541,7 @@ fn ensure_ctx_gitignore(root: &Path) -> Result<()> {
         updated.push('\n');
     }
     updated.push_str(".ctx/\n");
-    fs::write(path, updated)?;
+    write(root, path, &updated)?;
     Ok(())
 }
 
@@ -543,12 +560,115 @@ fn read_existing(path: &Path) -> Result<String> {
     }
 }
 
-fn write(path: PathBuf, contents: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+fn write(root: &Path, path: PathBuf, contents: &str) -> Result<()> {
+    let canonical_root = fs::canonicalize(root).with_context(|| {
+        format!(
+            "impossible de résoudre le dossier du projet: {}",
+            root.display()
+        )
+    })?;
+    let target = resolve_project_target(&canonical_root, &path)?;
+    if !target.starts_with(&canonical_root) {
+        bail!(
+            "écriture refusée: la destination sort du dossier du projet: {}",
+            path.display()
+        );
     }
-    fs::write(path, contents)?;
-    Ok(())
+
+    let parent = target
+        .parent()
+        .with_context(|| format!("destination sans dossier parent: {}", target.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("impossible de créer le dossier: {}", parent.display()))?;
+
+    let mut temporary = None;
+    for _ in 0..100 {
+        let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".ctx-write-{}-{sequence}.tmp", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                temporary = Some((candidate, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "impossible de créer un fichier temporaire dans {}",
+                        parent.display()
+                    )
+                });
+            }
+        }
+    }
+    let (temporary_path, mut file) =
+        temporary.context("impossible de créer un fichier temporaire pour l’écriture")?;
+    let result = (|| -> Result<()> {
+        file.write_all(contents.as_bytes())?;
+        // The rename replaces the inode: keep the existing file's permissions.
+        if let Ok(metadata) = fs::metadata(&target) {
+            file.set_permissions(metadata.permissions())?;
+        }
+        drop(file);
+        fs::rename(&temporary_path, &target)
+            .with_context(|| format!("impossible de remplacer le fichier: {}", target.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
+}
+
+fn resolve_project_target(canonical_root: &Path, path: &Path) -> Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    let mut remaining = Vec::new();
+    loop {
+        match fs::canonicalize(&current) {
+            Ok(canonical) => {
+                let target = remaining
+                    .iter()
+                    .rev()
+                    .fold(canonical, |target, component| target.join(component));
+                if !target.starts_with(canonical_root) {
+                    bail!(
+                        "écriture refusée: la destination sort du dossier du projet: {}",
+                        path.display()
+                    );
+                }
+                return Ok(target);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if fs::symlink_metadata(&current)
+                    .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    bail!(
+                        "écriture refusée: impossible de résoudre le lien symbolique: {}",
+                        current.display()
+                    );
+                }
+                let component = current.file_name().with_context(|| {
+                    format!("impossible de résoudre la destination: {}", path.display())
+                })?;
+                remaining.push(component.to_os_string());
+                current = current
+                    .parent()
+                    .with_context(|| {
+                        format!("impossible de résoudre la destination: {}", path.display())
+                    })?
+                    .to_path_buf();
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("impossible de résoudre la destination: {}", path.display())
+                });
+            }
+        }
+    }
 }
 
 fn find_executable(command: &str, search_path: &str) -> Option<PathBuf> {

@@ -58,6 +58,76 @@ fn install_does_not_create_gitignore_when_missing() {
     assert!(!project.path().join(".gitignore").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn install_refuses_configuration_symlinks_outside_project() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_file = outside.path().join("config.json");
+    fs::write(&outside_file, "{\"keep\":true}\n").unwrap();
+    symlink(&outside_file, project.path().join(".mcp.json")).unwrap();
+
+    let error = install(project.path(), "claude", "install").unwrap_err();
+
+    assert!(error.to_string().contains("sort du dossier du projet"));
+    assert_eq!(
+        fs::read_to_string(outside_file).unwrap(),
+        "{\"keep\":true}\n"
+    );
+    assert!(
+        fs::symlink_metadata(project.path().join(".mcp.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_refuses_parent_directory_symlinks_outside_project() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), project.path().join(".claude")).unwrap();
+
+    let error = install(project.path(), "claude", "install").unwrap_err();
+
+    assert!(error.to_string().contains("sort du dossier du projet"));
+    assert!(!outside.path().join("skills/ctx-explore/SKILL.md").exists());
+    assert!(
+        fs::symlink_metadata(project.path().join(".claude"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_writes_through_in_project_symlink_without_replacing_it() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::write(root.join("CLAUDE.md"), "# Existing Claude rules\n").unwrap();
+    symlink(root.join("CLAUDE.md"), root.join("AGENTS.md")).unwrap();
+
+    install(root, "codex", "install").unwrap();
+
+    assert!(
+        fs::symlink_metadata(root.join("AGENTS.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    let contents = fs::read_to_string(root.join("CLAUDE.md")).unwrap();
+    assert!(contents.contains("# Existing Claude rules"));
+    assert!(contents.contains("ctx-explore:begin"));
+}
+
 #[test]
 fn every_harness_receives_the_complete_skill_bundle_and_update() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/ctx-explore");
@@ -227,4 +297,18 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
 
 fn read_json(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn install_keeps_the_permissions_of_rewritten_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let config = root.join(".mcp.json");
+    fs::write(&config, "{}\n").unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    ctx_code::harness::install(root, "claude", "install").unwrap();
+    let mode = fs::metadata(&config).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
 }
