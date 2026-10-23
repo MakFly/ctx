@@ -11,9 +11,6 @@
   one definition (`--symbol NAME`) or an outline of the file's definitions
   (`--outline`) within a token budget, and names what it elided. No index
   needed.
-- `ctx hook rewrite --harness claude|codex`, an opt-in PreToolUse hook that
-  rewrites a plain `rg`/`grep -rn` search into `ctx search` and a `cat` of a
-  long file into `ctx read`; anything else runs unchanged.
 - `ctx metrics import-bench` records paired benchmark rows as measured
   savings.
 

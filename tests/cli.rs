@@ -428,59 +428,6 @@ fn explore_refreshes_git_and_non_git_sources_before_reusing_briefings() {
 }
 
 #[test]
-fn hook_rewrite_rewrites_bounded_commands_and_ignores_the_rest() {
-    let (_temporary, root) = fixture();
-    Command::cargo_bin("ctx")
-        .unwrap()
-        .arg("index")
-        .arg(&root)
-        .assert()
-        .success();
-    let run = |command: &str| {
-        let payload = serde_json::json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": {"command": command, "description": "search"},
-            "cwd": root,
-        });
-        Command::cargo_bin("ctx")
-            .unwrap()
-            .current_dir(&root)
-            .args(["hook", "rewrite", "--harness", "claude"])
-            .write_stdin(payload.to_string())
-            .output()
-            .unwrap()
-    };
-    let rewritten = run("rg -n foo");
-    assert!(rewritten.status.success());
-    let value: Value = serde_json::from_slice(&rewritten.stdout).unwrap();
-    let output = &value["hookSpecificOutput"];
-    assert_eq!(output["hookEventName"], "PreToolUse");
-    assert!(output.get("permissionDecision").is_none());
-    assert!(
-        output["updatedInput"]["command"]
-            .as_str()
-            .unwrap()
-            .starts_with("ctx search 'foo'")
-    );
-    assert_eq!(output["updatedInput"]["description"], "search");
-
-    let untouched = run("ls | head");
-    assert!(untouched.status.success());
-    assert!(untouched.stdout.is_empty());
-
-    let invalid = Command::cargo_bin("ctx")
-        .unwrap()
-        .current_dir(&root)
-        .args(["hook", "rewrite", "--harness", "claude"])
-        .write_stdin("not json")
-        .output()
-        .unwrap();
-    assert!(invalid.status.success());
-    assert!(invalid.stdout.is_empty());
-}
-
-#[test]
 fn missing_index_is_a_readable_error_without_backtrace() {
     let project = tempfile::tempdir().unwrap();
     let output = Command::cargo_bin("ctx")

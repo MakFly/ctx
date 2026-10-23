@@ -129,23 +129,6 @@ The stdio server exposes `ctx_search`, `ctx_graph`, `ctx_pack` and `ctx_file`.
 Full `ctx_search` sends structured evidence once to protocol 2025-06-18+ clients;
 older clients also receive the text fallback. Compact pack output is unchanged.
 
-### Optional rewrite hook
-
-`ctx hook rewrite --harness claude|codex` is a PreToolUse hook that turns a
-few shell commands an agent already runs into bounded ctx commands, with no
-instruction in the prompt: a plain `rg` or `grep -rn` search becomes
-`ctx search` when the repository has an index, and `cat` of a file over 200
-lines becomes `ctx read`. Pipes, redirections, command chains, globs and
-unknown flags run unchanged, and the hook never blocks a command. It is not
-installed by default. For Claude Code, add to a settings file:
-
-~~~json
-{ "hooks": { "PreToolUse": [ { "matcher": "Bash",
-  "hooks": [ { "type": "command", "command": "ctx hook rewrite --harness claude" } ] } ] } }
-~~~
-
-For Codex, put the same structure with `--harness codex` in `hooks.json`.
-
 ## Live indexing and freshness
 
 `ctx mcp` watches the repository for its session lifetime. To watch directly:
