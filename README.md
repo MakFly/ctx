@@ -154,7 +154,7 @@ results the same way. For Codex, add it to `~/.codex/hooks.json`:
 Codex applies a rewrite only with an explicit allow, so the hook allows the
 rewritten command: it only ever contains the checked steps above, and a `cd`
 prefix is not rewritten for Codex. `--expand-tokens N` sets the appended-source
-budget (default 1,500; 0 disables it). `ctx compact` also filters any search
+budget (default 600, chosen by bench; 0 disables it). `ctx compact` also filters any search
 output on stdin: `rg -n login | ctx compact`.
 
 ## Live indexing and freshness

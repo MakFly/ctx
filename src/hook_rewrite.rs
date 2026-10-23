@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 /// Token budget for the definition bodies appended to a compacted search.
-const EXPAND_TOKENS: usize = 1_500;
+const EXPAND_TOKENS: usize = 600;
 
 /// Rewrites `command` into a cheaper equivalent, or returns `None` to leave it unchanged.
 pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {

@@ -193,7 +193,7 @@ fn expand_definitions(
     let mut spans: Vec<(String, usize, usize)> = Vec::new();
     // Each candidate as it would be printed now: clipped against the spans already
     // shown, cut at the body cap, with the matches it still holds.
-    let render = |candidate: &Candidate, spans: &[(String, usize, usize)]| {
+    let render = |candidate: &Candidate, spans: &[(String, usize, usize)], room: usize| {
         let (mut from, mut to) = (candidate.from, candidate.to);
         for (path, start, end) in spans {
             if *path != candidate.path || *end < from || *start > to {
@@ -215,7 +215,7 @@ fn expand_definitions(
         let mut cut = None;
         for number in from..=to {
             let text = format!("{number}\t{}\n", lines[number - 1]);
-            if estimate_tokens(&block) + estimate_tokens(&text) > MAX_BODY_TOKENS {
+            if estimate_tokens(&block) + estimate_tokens(&text) > MAX_BODY_TOKENS.min(room) {
                 cut = Some(number);
                 break;
             }
@@ -237,7 +237,8 @@ fn expand_definitions(
             .iter()
             .enumerate()
             .filter_map(|(index, candidate)| {
-                render(candidate, &spans).map(|rendered| (index, rendered))
+                render(candidate, &spans, budget.saturating_sub(used))
+                    .map(|rendered| (index, rendered))
             })
             .max_by_key(|(index, (hits, ..))| (*hits, std::cmp::Reverse(remaining[*index].order)));
         let Some((index, (_, from, to, block))) = best else {

@@ -188,7 +188,7 @@ enum Command {
         #[arg(long, default_value_t = 240)]
         max_line_chars: usize,
         /// Token budget for matched definition bodies and the lines around other matches (0 disables it).
-        #[arg(long, default_value_t = 1_500)]
+        #[arg(long, default_value_t = 600)]
         expand_tokens: usize,
         /// Run this search and compact its output, exiting with its status.
         #[arg(long, requires = "search")]
