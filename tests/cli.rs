@@ -1085,3 +1085,33 @@ fn compact_run_passes_all_non_utf8_output_past_the_buffer_cap() {
     let last = [b"./a.txt:", lines.to_string().as_bytes(), b":needle\xff\n"].concat();
     assert!(output.stdout.ends_with(&last));
 }
+
+#[cfg(unix)]
+#[test]
+fn compact_run_streams_output_past_the_cap_whole_even_if_late_bytes_are_not_utf8() {
+    let temporary = tempfile::tempdir().unwrap();
+    let lines = 1_000_000;
+    let mut body = b"needle\n".repeat(lines);
+    body.extend_from_slice(b"needle\xff\n");
+    fs::write(temporary.path().join("a.txt"), body).unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-a", "-r", "needle", "."])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.len() > 16 * 1024 * 1024);
+    assert_eq!(
+        output.stdout.iter().filter(|byte| **byte == b'\n').count(),
+        lines + 1
+    );
+    assert!(output.stdout.starts_with(b"./a.txt:1:needle\n"));
+    let last = [
+        b"./a.txt:",
+        (lines + 1).to_string().as_bytes(),
+        b":needle\xff\n",
+    ]
+    .concat();
+    assert!(output.stdout.ends_with(&last));
+}

@@ -1791,28 +1791,28 @@ fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> R
         Ok(child) => child,
         Err(code) => return Ok(code),
     };
-    // At most RUN_OUTPUT_BYTES are kept (compaction shows far less); the rest is read
-    // and dropped so the search never blocks on a full pipe.
+    // Output that fits RUN_OUTPUT_BYTES and is UTF-8 is compacted. Anything else (more
+    // than that, or a name or a line in another encoding) goes out whole, line by line,
+    // as the search printed it without `--null`: nothing is cut, dropped or decoded.
     let mut kept = Vec::new();
     let mut stdout = child.stdout.take().context("search stdout")?;
     stdout
         .by_ref()
-        .take(RUN_OUTPUT_BYTES)
+        .take(RUN_OUTPUT_BYTES + 1)
         .read_to_end(&mut kept)?;
-    // Text that is not UTF-8 (a name or a line in another encoding) is not decoded into
-    // something that does not exist: the whole stream, kept bytes then the rest, goes
-    // out line by line as the search printed it without `--null`.
-    let text = match String::from_utf8(kept) {
-        Ok(text) => text,
-        // Only a character cut at the cap: keep the whole ones before it.
-        Err(error) if error.utf8_error().error_len().is_none() => {
-            let valid = error.utf8_error().valid_up_to();
-            let mut bytes = error.into_bytes();
-            bytes.truncate(valid);
-            String::from_utf8(bytes).expect("cut at a character boundary")
+    let compactable = if kept.len() as u64 <= RUN_OUTPUT_BYTES {
+        String::from_utf8(kept).map_err(|error| error.into_bytes())
+    } else {
+        Err(kept)
+    };
+    match compactable {
+        Ok(text) => {
+            let exit = child.wait()?;
+            print!("{}", ctx_code::compact::compact(&text, options));
+            Ok(step_status(exit))
         }
-        Err(error) => {
-            let mut lines = io::BufReader::new(io::Cursor::new(error.into_bytes()).chain(stdout));
+        Err(kept) => {
+            let mut lines = io::BufReader::new(io::Cursor::new(kept).chain(stdout));
             let mut out = io::stdout().lock();
             let mut line = Vec::new();
             while lines.read_until(b'\n', &mut line)? > 0 {
@@ -1820,16 +1820,9 @@ fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> R
                 line.clear();
             }
             drop(out);
-            return Ok(step_status(child.wait()?));
+            Ok(step_status(child.wait()?))
         }
-    };
-    let dropped = io::copy(&mut stdout, &mut io::sink())?;
-    let exit = child.wait()?;
-    print!("{}", ctx_code::compact::compact(&text, options));
-    if dropped > 0 {
-        println!("... {dropped} more bytes of search output not read; narrow the search");
     }
-    Ok(step_status(exit))
 }
 
 /// Runs one plain read (or a file listing) with its output straight to ours; returns
@@ -1859,7 +1852,7 @@ fn without_added_nul(line: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Search output kept by `ctx compact --run` before the rest is dropped.
+/// Largest search output `ctx compact --run` compacts; a longer one goes out whole.
 const RUN_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The shell status of a process killed by a signal: 128 + the signal number.
