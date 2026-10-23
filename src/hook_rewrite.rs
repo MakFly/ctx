@@ -357,6 +357,10 @@ const GREP: SearchOptions = SearchOptions {
 /// match or format (see [`SearchOptions`]); operands are patterns and paths.
 fn is_search(program: &str, arguments: &[String]) -> bool {
     let options = match program {
+        // An rg config file may add `--pre` and friends, which this check cannot see.
+        "rg" if std::env::var_os("RIPGREP_CONFIG_PATH").is_some_and(|path| !path.is_empty()) => {
+            return false;
+        }
         "rg" => &RG,
         "grep" => &GREP,
         _ => return false,
@@ -457,12 +461,6 @@ pub fn hook_response(payload: &Value, harness: &str) -> Option<Value> {
         Some(cwd) if !cwd.is_empty() => PathBuf::from(cwd),
         _ => std::env::current_dir().ok()?,
     };
-    // An rg config file may add `--pre` and friends, which the option check cannot see.
-    if std::env::var_os("RIPGREP_CONFIG_PATH").is_some_and(|path| !path.is_empty())
-        && command.contains("rg")
-    {
-        return None;
-    }
     // Codex runs the rewritten command without asking (it applies `updatedInput` only with
     // an explicit allow): only one bare search, which `ctx compact --run` starts from PATH
     // itself, no shell list whose other commands would go through aliases or functions.

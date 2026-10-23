@@ -816,35 +816,50 @@ fn compact_run_keeps_the_search_status_and_compacts_its_output() {
     assert_eq!(quiet.status.code(), Some(0));
 }
 
+/// A directory holding one fake search tool named `name`, for a controlled PATH.
+#[cfg(unix)]
+fn fake_tool(name: &str, script: Option<&str>) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(name);
+    fs::write(&path, script.unwrap_or("not a program")).unwrap();
+    let mode = if script.is_some() { 0o755 } else { 0o644 };
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+    directory
+}
+
 #[cfg(unix)]
 #[test]
-fn compact_run_reports_a_signal_as_the_shell_does() {
-    let killed = Command::cargo_bin("ctx")
-        .unwrap()
-        .args(["compact", "--run", "--", "sh", "-c", "kill -TERM $$"])
-        .output()
-        .unwrap();
-    assert_eq!(killed.status.code(), Some(143));
+fn compact_run_reports_spawn_failures_and_signals_as_the_shell_does() {
+    let run = |path: &Path| {
+        Command::cargo_bin("ctx")
+            .unwrap()
+            .env("PATH", path)
+            .args(["compact", "--run", "--", "rg", "foo"])
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    let empty = tempfile::tempdir().unwrap();
+    assert_eq!(run(empty.path()), Some(127));
+    let unrunnable = fake_tool("rg", None);
+    assert_eq!(run(unrunnable.path()), Some(126));
+    let killed = fake_tool("rg", Some("#!/bin/sh\nkill -TERM $$\n"));
+    assert_eq!(run(killed.path()), Some(143));
 }
 
 #[test]
-fn compact_run_reports_a_missing_or_unrunnable_search_as_the_shell_does() {
-    let temporary = tempfile::tempdir().unwrap();
-    let missing = Command::cargo_bin("ctx")
-        .unwrap()
-        .args(["compact", "--run", "--", "no-such-search-tool-xyz"])
-        .output()
-        .unwrap();
-    assert_eq!(missing.status.code(), Some(127));
-    let plain = temporary.path().join("not-executable");
-    fs::write(&plain, "x").unwrap();
-    let unrunnable = Command::cargo_bin("ctx")
-        .unwrap()
-        .args(["compact", "--run", "--"])
-        .arg(&plain)
-        .output()
-        .unwrap();
-    assert_eq!(unrunnable.status.code(), Some(126));
+fn compact_run_runs_rg_or_grep_only() {
+    for program in ["sh", "/usr/bin/grep", "./rg"] {
+        let output = Command::cargo_bin("ctx")
+            .unwrap()
+            .args(["compact", "--run", "--", program, "-c", "true"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{program}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("rg or grep only"));
+    }
 }
 
 #[test]
@@ -858,6 +873,23 @@ fn hook_rewrite_leaves_rg_alone_when_an_rg_config_file_is_set() {
         .output()
         .unwrap();
     assert!(configured.stdout.is_empty());
+    // Spelled any way the shell decodes to `rg`, for either harness.
+    for command in [r"r\g foo", "'r'g foo", "\"rg\" foo"] {
+        for harness in ["codex", "claude"] {
+            let body = serde_json::json!({
+                "tool_name": "Bash", "cwd": "/", "tool_input": {"command": command}
+            })
+            .to_string();
+            let spelled = Command::cargo_bin("ctx")
+                .unwrap()
+                .env("RIPGREP_CONFIG_PATH", "/tmp/some-rgrc")
+                .args(["hook", "rewrite", "--harness", harness])
+                .write_stdin(body)
+                .output()
+                .unwrap();
+            assert!(spelled.stdout.is_empty(), "{harness} {command}");
+        }
+    }
     let plain = Command::cargo_bin("ctx")
         .unwrap()
         .env_remove("RIPGREP_CONFIG_PATH")

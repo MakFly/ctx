@@ -946,6 +946,10 @@ async fn execute(cli: Cli) -> Result<()> {
             if run {
                 // The search keeps the caller's stdin and stderr; only its output is compacted.
                 let (program, arguments) = search.split_first().context("--run needs a search")?;
+                // A search runner, not a process runner: `rg` or `grep`, found on PATH.
+                if !matches!(program.as_str(), "rg" | "grep") {
+                    bail!("--run runs rg or grep only, not {program}");
+                }
                 let output = match std::process::Command::new(program)
                     .args(arguments)
                     .stdin(std::process::Stdio::inherit())
