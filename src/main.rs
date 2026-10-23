@@ -953,7 +953,13 @@ async fn execute(cli: Cli) -> Result<()> {
                     .output()
                     .with_context(|| format!("cannot run {program}"))?;
                 input = String::from_utf8_lossy(&output.stdout).into_owned();
-                status = Some(output.status.code().unwrap_or(1));
+                // A search killed by a signal reports 128 + signal, as the shell would.
+                status = Some(
+                    output
+                        .status
+                        .code()
+                        .unwrap_or_else(|| exit_signal(&output.status)),
+                );
             } else {
                 io::stdin().read_to_string(&mut input)?;
             }
@@ -1722,4 +1728,16 @@ fn emit_envelope(
 fn emit(value: &impl Serialize, _as_json: bool) -> Result<()> {
     println!("{}", render_json(value, io::stdout().is_terminal())?);
     Ok(())
+}
+
+/// The shell status of a process killed by a signal: 128 + the signal number.
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    128 + status.signal().unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> i32 {
+    1
 }

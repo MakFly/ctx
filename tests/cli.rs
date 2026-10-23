@@ -815,3 +815,14 @@ fn compact_run_keeps_the_search_status_and_compacts_its_output() {
         .unwrap();
     assert_eq!(quiet.status.code(), Some(0));
 }
+
+#[cfg(unix)]
+#[test]
+fn compact_run_reports_a_signal_as_the_shell_does() {
+    let killed = Command::cargo_bin("ctx")
+        .unwrap()
+        .args(["compact", "--run", "--", "sh", "-c", "kill -TERM $$"])
+        .output()
+        .unwrap();
+    assert_eq!(killed.status.code(), Some(143));
+}

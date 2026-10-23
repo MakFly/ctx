@@ -49,8 +49,14 @@ struct Source {
     symbols: Vec<crate::model::Symbol>,
 }
 
+/// Largest source file read to show its lines; a bigger one gets matches only.
+const MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
+
 fn load(root: &Path, path: &str) -> Option<Source> {
     let full = root.join(path);
+    if std::fs::metadata(&full).ok()?.len() > MAX_SOURCE_BYTES {
+        return None;
+    }
     let text = std::fs::read_to_string(&full).ok()?;
     let symbols = crate::config::language(&full)
         .and_then(|lang| crate::parser::parse_source(&text, lang).ok())

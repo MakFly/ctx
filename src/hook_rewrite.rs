@@ -1,10 +1,10 @@
 //! PreToolUse hook that makes a few shell commands cheaper to read without changing what they do.
 //!
-//! A search (`rg`, `grep`, optionally piped to head/tail/sort/uniq) runs unchanged and
-//! its output is piped to `ctx compact` (a bare search runs under `ctx compact --run`, which
-//! keeps its exit status), which groups matches by file and bounds the output. A
-//! list is rewritten only when every other command in it is a plain read, since Codex runs the
-//! rewritten command without asking. Anything else runs untouched; the hook never blocks.
+//! A bare search (`rg` or `grep` with options from a known safe set) runs under
+//! `ctx compact --run`, which runs it unchanged, groups its matches by file, bounds the output
+//! and exits with the search's own status. A list is rewritten only when every other command
+//! in it is a plain read, since Codex runs the rewritten command without asking. Anything else
+//! (a pipe, a redirect, an expansion) runs untouched; the hook never blocks.
 
 use std::path::{Path, PathBuf};
 
@@ -148,7 +148,9 @@ fn rewrite_search_pipeline(command: &str) -> Option<String> {
         .collect::<Option<Vec<_>>>()?;
     let (first, filters) = stages.split_first()?;
     let (program, arguments) = first.split_first()?;
-    if !is_search(program, arguments) || !filters.iter().all(|stage| is_line_filter(stage)) {
+    // A filter after the search would make the pipeline's status its own (or a pipefail
+    // mix the hook cannot see): only a bare search is rewritten, its status kept exactly.
+    if !filters.is_empty() || !is_search(program, arguments) {
         return None;
     }
     // `-H` prints the path even for a single file, so the lines parse and the
@@ -160,25 +162,9 @@ fn rewrite_search_pipeline(command: &str) -> Option<String> {
         .map(|word| shell_word(word))
         .collect::<Vec<_>>()
         .join(" ");
-    if filters.is_empty() {
-        // `ctx compact --run` runs the search itself and exits with its status, so
-        // `rg -q x && y` gates `y` exactly as before.
-        return Some(format!("ctx compact --run -- {search}"));
-    }
-    let filters = filters
-        .iter()
-        .map(|stage| {
-            stage
-                .iter()
-                .map(|word| shell_word(word))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
-    // The last filter's status was the pipeline's; `head`, `tail`, `sort` and `uniq`
-    // exit 0 on any input, as `ctx compact` does.
-    Some(format!("{search} | {filters} | ctx compact"))
+    // `ctx compact --run` runs the search itself and exits with its status, so
+    // `rg -q x && y` gates `y` exactly as before.
+    Some(format!("ctx compact --run -- {search}"))
 }
 
 /// `word` as one shell word: bare when it holds only safe characters, else single-quoted.
@@ -420,55 +406,6 @@ fn is_search(program: &str, arguments: &[String]) -> bool {
     true
 }
 
-/// `head`, `tail`, `sort` or `uniq` reading the pipe, with options that only filter or
-/// reorder lines (no `sort -o` output file, no `--compress-program`, no file operand).
-fn is_line_filter(stage: &[String]) -> bool {
-    let Some((program, arguments)) = stage.split_first() else {
-        return false;
-    };
-    let letters = |allowed: &str| {
-        arguments.iter().all(|argument| {
-            argument.len() > 1
-                && argument.starts_with('-')
-                && !argument.starts_with("--")
-                && argument[1..].chars().all(|letter| allowed.contains(letter))
-        })
-    };
-    match program.as_str() {
-        "head" | "tail" => count_options(arguments).is_some_and(|operands| operands.is_empty()),
-        "sort" => {
-            let mut index = 0;
-            while index < arguments.len() {
-                let argument = &arguments[index];
-                if argument == "-k" || argument == "-t" {
-                    match arguments.get(index + 1) {
-                        Some(value) if !value.starts_with('-') || value.len() == 1 => index += 2,
-                        _ => return false,
-                    }
-                    continue;
-                }
-                if !(argument.len() > 1
-                    && argument.starts_with('-')
-                    && !argument.starts_with("--")
-                    && (argument[1..]
-                        .chars()
-                        .all(|letter| "nrufbhV".contains(letter))
-                        || (argument.starts_with("-k")
-                            && argument[2..]
-                                .chars()
-                                .all(|c| c.is_ascii_digit() || ",.nr".contains(c)))))
-                {
-                    return false;
-                }
-                index += 1;
-            }
-            true
-        }
-        "uniq" => letters("cdui"),
-        _ => false,
-    }
-}
-
 /// Splits on unquoted `|` (not `||`); `None` when a quote is left open.
 fn split_pipeline(command: &str) -> Option<Vec<&str>> {
     let bytes = command.as_bytes();
@@ -607,7 +544,8 @@ fn scan_word(text: &str, start: usize) -> Option<(String, usize)> {
                     '"' => break,
                     '\n' | '$' | '`' => return None,
                     '\\' => match chars.next()?.1 {
-                        escaped @ ('"' | '\\') => word.push(escaped),
+                        // In double quotes a backslash escapes only `"`, `\\`, `$` and a backtick.
+                        escaped @ ('"' | '\\' | '$' | '`') => word.push(escaped),
                         '\n' => return None,
                         other => {
                             word.push('\\');
@@ -729,14 +667,11 @@ mod tests {
                 "rg -n \"a|b\" src -g '*.ts'",
                 "ctx compact --run -- rg -H -n 'a|b' src -g '*.ts'",
             ),
-            (
-                "rg -n foo src | head -160",
-                "rg -H -n foo src | head -160 | ctx compact",
-            ),
             ("grep -rn foo .", "ctx compact --run -- grep -H -rn foo ."),
+            // Inside double quotes `\$` is a literal `$`, kept so by the requoted word.
             (
-                "rg -n foo | sort | uniq -c",
-                "rg -H -n foo | sort | uniq -c | ctx compact",
+                "grep -F \"\\$HOME\" a.rs",
+                "ctx compact --run -- grep -H -F '$HOME' a.rs",
             ),
             (
                 "rg -n \"it's\" a.rs",
@@ -826,9 +761,12 @@ mod tests {
             "sed -n '1,20p' a.rs; ctx compact --run -- rg -H -n foo src"
         );
         assert_eq!(
-            rewrite_command("rg -n a && rg -n b | head -5", cwd).unwrap(),
-            "ctx compact --run -- rg -H -n a && rg -H -n b | head -5 | ctx compact"
+            rewrite_command("rg -n a && rg -n b", cwd).unwrap(),
+            "ctx compact --run -- rg -H -n a && ctx compact --run -- rg -H -n b"
         );
+        // A filtered search makes the pipeline's status the filter's: left alone.
+        assert!(rewrite_command("rg -n a && rg -n b | head -5", cwd).is_none());
+        assert!(rewrite_command("rg -n foo src | head -160", cwd).is_none());
         assert!(rewrite_command("sed -n '1,2p' a; ls", cwd).is_none());
         assert!(rewrite_command("rg a; rm x > y", cwd).is_none());
         assert!(rewrite_command("rg a & rg b", cwd).is_none());
@@ -859,7 +797,6 @@ mod tests {
             assert!(rewrite_command(command, cwd).is_none(), "{command:?}");
         }
         for command in [
-            "rg foo | sort -k2 -n | uniq -c",
             "sed -n '10,$p' a.rs && rg foo",
             "cat a.rs; nl -ba b.rs; head -n 20 c.rs; rg foo",
         ] {
