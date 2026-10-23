@@ -994,3 +994,20 @@ fn compact_run_prints_file_lists_as_the_search_wrote_them() {
         assert_eq!(names, ["--", "a:1:foo"], "{listing:?}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn compact_run_passes_a_file_list_through_byte_for_byte() {
+    use std::os::unix::ffi::OsStrExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+    fs::write(temporary.path().join(name), "x\n").unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "rg", "--files", "."])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"./caf\xe9.txt\n");
+}

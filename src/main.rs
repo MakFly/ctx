@@ -1777,6 +1777,11 @@ fn step_status(exit: std::process::ExitStatus) -> i32 {
 
 /// Runs one search and prints its compacted output; returns its status.
 fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> Result<i32> {
+    // File names and counts go straight to our stdout, byte for byte and unbounded:
+    // they are not `path:line:text`, and a name must never be cut or decoded.
+    if ctx_code::hook_rewrite::is_listing(words) {
+        return run_read(words);
+    }
     let words = ctx_code::hook_rewrite::normalize_search(words);
     let mut child = match spawn_step(&words, std::process::Stdio::piped())? {
         Ok(child) => child,
@@ -1792,21 +1797,18 @@ fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> R
         .read_to_end(&mut kept)?;
     let dropped = io::copy(&mut stdout, &mut io::sink())?;
     let exit = child.wait()?;
-    let text = String::from_utf8_lossy(&kept);
-    // File names and counts are printed as the search wrote them: they are not
-    // `path:line:text`, and a name must never be read as a match.
-    if ctx_code::hook_rewrite::is_listing(&words) {
-        print!("{text}");
-    } else {
-        print!("{}", ctx_code::compact::compact(&text, options));
-    }
+    print!(
+        "{}",
+        ctx_code::compact::compact(&String::from_utf8_lossy(&kept), options)
+    );
     if dropped > 0 {
         println!("... {dropped} more bytes of search output not read; narrow the search");
     }
     Ok(step_status(exit))
 }
 
-/// Runs one plain read with its output straight to ours; returns its status.
+/// Runs one plain read (or a file listing) with its output straight to ours; returns
+/// its status.
 fn run_read(words: &[String]) -> Result<i32> {
     match spawn_step(words, std::process::Stdio::inherit())? {
         Ok(mut child) => Ok(step_status(child.wait()?)),
