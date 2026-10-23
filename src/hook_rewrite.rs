@@ -2,22 +2,23 @@
 //!
 //! A search (`rg`, `grep`, `git grep`, optionally piped to head/tail/sort/uniq) runs unchanged and
 //! its output is piped to `ctx compact`, which groups matches by file and bounds the output. A
-//! `cat` of a long file becomes `ctx read`. Anything else runs untouched; the hook never blocks.
+//! list is rewritten only when every other command in it is a plain read, since Codex runs the
+//! rewritten command without asking. Anything else runs untouched; the hook never blocks.
 
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-const CAT_MAX_UNREWRITTEN_LINES: usize = 200;
 /// Token budget for the definition bodies appended to a compacted search.
 const EXPAND_TOKENS: usize = 1_500;
-/// Stages a search may be piped through before compaction: they only filter or reorder lines.
-const LINE_FILTERS: &[&str] = &["head", "tail", "sort", "uniq"];
 
 /// Rewrites `command` into a cheaper equivalent, or returns `None` to leave it unchanged.
 pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {
+    // A newline separates commands in the shell, and other control characters have no
+    // place in a search: either could hide a second command, so nothing is rewritten.
+    if command.chars().any(|c| c.is_control() && c != '\t') {
+        return None;
+    }
     let (prefix, directory, rest) = split_cd_prefix(command)?;
     let effective = match &directory {
         Some(directory) => cwd.join(directory),
@@ -27,40 +28,115 @@ pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {
     if directory.is_some() && !effective.is_dir() {
         return None;
     }
-    // A list `a; b && c`: each search in it is compacted, everything else runs as is.
+    // A list `a; b && c`: each search in it is compacted; any other command must be a
+    // plain read, or the whole list is left alone.
     let segments = split_list(rest)?;
-    if segments.len() > 1 {
-        let mut changed = false;
-        let mut out = String::new();
-        for (segment, separator) in &segments {
-            match rewrite_search_pipeline(segment) {
-                Some(rewritten) => {
-                    changed = true;
-                    out.push_str(&rewritten);
-                }
-                None => {
-                    // Every segment must still be a form this hook understands.
-                    split_pipeline(segment)?
-                        .into_iter()
-                        .map(tokenize)
-                        .collect::<Option<Vec<_>>>()?;
-                    out.push_str(segment.trim_end());
-                }
+    let mut changed = false;
+    let mut out = String::new();
+    for (segment, separator) in &segments {
+        match rewrite_search_pipeline(segment) {
+            Some(rewritten) => {
+                changed = true;
+                out.push_str(&rewritten);
             }
-            out.push_str(separator);
+            None => {
+                let words = tokenize(segment)?;
+                if split_pipeline(segment)?.len() != 1 || !is_plain_read(&words) {
+                    return None;
+                }
+                out.push_str(segment.trim_end());
+            }
         }
-        return changed.then(|| format!("{prefix}{out}"));
+        out.push_str(separator);
     }
-    let stages = split_pipeline(rest)?
-        .into_iter()
-        .map(tokenize)
-        .collect::<Option<Vec<_>>>()?;
-    let (first, _) = stages.split_first()?;
-    let (program, arguments) = first.split_first()?;
-    if stages.len() == 1 && program == "cat" {
-        return Some(format!("{prefix}{}", rewrite_cat(arguments, &effective)?));
+    changed.then(|| format!("{prefix}{out}"))
+}
+
+/// A command that only prints files or directory names: `sed -n 'A,Bp'`, `cat`, `nl`,
+/// `head`/`tail -n N`, `wc`, `ls`, `pwd`, with no option that writes or runs anything.
+fn is_plain_read(words: &[String]) -> bool {
+    let Some((program, arguments)) = words.split_first() else {
+        return false;
+    };
+    let operands_only = |allowed: &[&str]| {
+        arguments
+            .iter()
+            .all(|argument| !argument.starts_with('-') || allowed.contains(&argument.as_str()))
+    };
+    match program.as_str() {
+        "sed" => {
+            arguments.first().is_some_and(|flag| flag == "-n")
+                && arguments.len() >= 3
+                && arguments[1..].iter().enumerate().all(|(index, argument)| {
+                    if index == 0 {
+                        is_print_range(argument)
+                    } else {
+                        !argument.starts_with('-')
+                    }
+                })
+        }
+        "cat" => operands_only(&["-n"]),
+        "nl" => operands_only(&["-ba"]),
+        "wc" => operands_only(&["-l", "-c", "-w"]),
+        "ls" => operands_only(&["-l", "-a", "-la", "-al", "-1", "-R"]),
+        "pwd" => arguments.is_empty(),
+        "head" | "tail" => count_options(arguments).is_some(),
+        _ => false,
     }
-    Some(format!("{prefix}{}", rewrite_search_pipeline(rest)?))
+}
+
+/// `N p` or `A,B p` scripts only: `sed` with anything else may write files (`w`) or run (`e`).
+fn is_print_range(script: &str) -> bool {
+    let Some(range) = script.strip_suffix('p') else {
+        return false;
+    };
+    let mut bounds = range.split(',');
+    let first = bounds.next().unwrap_or_default();
+    let second = bounds.next();
+    bounds.next().is_none()
+        && !first.is_empty()
+        && first.bytes().all(|byte| byte.is_ascii_digit())
+        && second.is_none_or(|second| {
+            second == "$"
+                || (!second.is_empty() && second.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+}
+
+/// `head`/`tail` options: `-n N`, `-nN`, `-N`, `--lines=N`; returns the operands (files).
+fn count_options(arguments: &[String]) -> Option<Vec<&String>> {
+    let mut operands = Vec::new();
+    let mut index = 0;
+    let number = |text: &str| {
+        !text.is_empty()
+            && text
+                .trim_start_matches(['+', '-'])
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+    };
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if argument == "-n" {
+            if !number(arguments.get(index + 1)?) {
+                return None;
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(count) = argument
+            .strip_prefix("--lines=")
+            .or_else(|| argument.strip_prefix("-n"))
+            .or_else(|| argument.strip_prefix('-'))
+            .filter(|_| argument.starts_with('-'))
+        {
+            if !number(count) {
+                return None;
+            }
+        } else {
+            operands.push(argument);
+        }
+        index += 1;
+    }
+    Some(operands)
 }
 
 /// `search [| filter]...` followed by ` | ctx compact`, or `None`.
@@ -84,7 +160,13 @@ fn rewrite_search_pipeline(command: &str) -> Option<String> {
         },
         _ => command.to_owned(),
     };
-    Some(format!("{command} | ctx compact"))
+    // With no filter the search's own status is the pipeline's: `ctx compact --fail-empty`
+    // exits 1 on no output, as `rg` and `grep` do on no match, so `rg x && y` still gates `y`.
+    if filters.is_empty() {
+        Some(format!("{command} | ctx compact --fail-empty"))
+    } else {
+        Some(format!("{command} | ctx compact"))
+    }
 }
 
 /// Splits a command list on unquoted `;` and `&&`, keeping each separator (with
@@ -172,14 +254,53 @@ fn is_search(program: &str, arguments: &[String]) -> bool {
     })
 }
 
-/// `head`, `tail`, `sort` or `uniq` with options only: no file argument, so they read the pipe.
+/// `head`, `tail`, `sort` or `uniq` reading the pipe, with options that only filter or
+/// reorder lines (no `sort -o` output file, no `--compress-program`, no file operand).
 fn is_line_filter(stage: &[String]) -> bool {
-    stage.split_first().is_some_and(|(program, arguments)| {
-        LINE_FILTERS.contains(&program.as_str())
-            && arguments
-                .iter()
-                .all(|argument| argument.starts_with('-') || argument.parse::<u64>().is_ok())
-    })
+    let Some((program, arguments)) = stage.split_first() else {
+        return false;
+    };
+    let letters = |allowed: &str| {
+        arguments.iter().all(|argument| {
+            argument.len() > 1
+                && argument.starts_with('-')
+                && !argument.starts_with("--")
+                && argument[1..].chars().all(|letter| allowed.contains(letter))
+        })
+    };
+    match program.as_str() {
+        "head" | "tail" => count_options(arguments).is_some_and(|operands| operands.is_empty()),
+        "sort" => {
+            let mut index = 0;
+            while index < arguments.len() {
+                let argument = &arguments[index];
+                if argument == "-k" || argument == "-t" {
+                    match arguments.get(index + 1) {
+                        Some(value) if !value.starts_with('-') || value.len() == 1 => index += 2,
+                        _ => return false,
+                    }
+                    continue;
+                }
+                if !(argument.len() > 1
+                    && argument.starts_with('-')
+                    && !argument.starts_with("--")
+                    && (argument[1..]
+                        .chars()
+                        .all(|letter| "nrufbhV".contains(letter))
+                        || (argument.starts_with("-k")
+                            && argument[2..]
+                                .chars()
+                                .all(|c| c.is_ascii_digit() || ",.nr".contains(c)))))
+                {
+                    return false;
+                }
+                index += 1;
+            }
+            true
+        }
+        "uniq" => letters("cdui"),
+        _ => false,
+    }
 }
 
 /// Splits on unquoted `|` (not `||`); `None` when a quote is left open.
@@ -242,55 +363,6 @@ pub fn hook_response(payload: &Value, harness: &str) -> Option<Value> {
         output["permissionDecision"] = json!("allow");
     }
     Some(json!({ "hookSpecificOutput": output }))
-}
-
-fn rewrite_cat(arguments: &[String], cwd: &Path) -> Option<String> {
-    let [file] = arguments else {
-        return None;
-    };
-    if file.starts_with('-') {
-        return None;
-    }
-    let path = cwd.join(file);
-    if !fs::metadata(&path).ok()?.is_file() || !has_index(&path) {
-        return None;
-    }
-    if count_lines_up_to(&path, CAT_MAX_UNREWRITTEN_LINES + 1)? <= CAT_MAX_UNREWRITTEN_LINES {
-        return None;
-    }
-    Some(format!("ctx read {}", quote(file)))
-}
-
-fn count_lines_up_to(path: &Path, limit: usize) -> Option<usize> {
-    let mut reader = BufReader::new(File::open(path).ok()?);
-    let mut buffer = Vec::new();
-    let mut lines = 0;
-    while lines < limit {
-        buffer.clear();
-        if reader.read_until(b'\n', &mut buffer).ok()? == 0 {
-            break;
-        }
-        lines += 1;
-    }
-    Some(lines)
-}
-
-/// True when an index serves `target` (a directory, or a file whose parent directory counts).
-fn has_index(target: &Path) -> bool {
-    let directory = if target.is_dir() {
-        Some(target)
-    } else {
-        target.parent()
-    };
-    directory.is_some_and(|directory| {
-        crate::config::find_ctx(directory)
-            .map(|ctx| ctx.join("index.sqlite").is_file())
-            .unwrap_or(false)
-    })
-}
-
-fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 const BLANKS: [char; 2] = [' ', '\t'];
@@ -479,10 +551,6 @@ pub fn post_tool_response(payload: &Value, harness: &str) -> Option<Value> {
 mod tests {
     use super::*;
 
-    fn lines(count: usize) -> String {
-        (0..count).map(|n| format!("line {n}\n")).collect()
-    }
-
     #[test]
     fn searches_run_unchanged_and_pipe_into_compact() {
         let dir = tempfile::tempdir().unwrap();
@@ -499,21 +567,26 @@ mod tests {
                 rewrite_command(command, cwd).as_deref(),
                 Some(
                     format!(
-                        "{} | ctx compact",
+                        "{} | ctx compact{}",
                         command
                             .replacen("rg ", "rg -H ", 1)
                             .replacen("grep -rn", "grep -H -rn", 1)
-                            .replacen("git grep -H -rn", "git grep -rn", 1)
+                            .replacen("git grep -H -rn", "git grep -rn", 1),
+                        if command.contains(" | ") {
+                            ""
+                        } else {
+                            " --fail-empty"
+                        }
                     )
                     .as_str()
                 ),
                 "{command}"
             );
         }
-        fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
         assert_eq!(
             rewrite_command("cd src && rg -n foo", cwd).unwrap(),
-            "cd src && rg -H -n foo | ctx compact"
+            "cd src && rg -H -n foo | ctx compact --fail-empty"
         );
     }
 
@@ -540,6 +613,8 @@ mod tests {
             "ls | head",
             "",
             "rg foo\r",
+            "rg foo\nrm victim",
+            "rg foo \\\nrm victim",
         ] {
             assert!(rewrite_command(command, cwd).is_none(), "{command:?}");
         }
@@ -552,11 +627,11 @@ mod tests {
         let cwd = dir.path();
         assert_eq!(
             rewrite_command("sed -n '1,20p' a.rs; rg -n foo src", cwd).unwrap(),
-            "sed -n '1,20p' a.rs; rg -H -n foo src | ctx compact"
+            "sed -n '1,20p' a.rs; rg -H -n foo src | ctx compact --fail-empty"
         );
         assert_eq!(
             rewrite_command("rg -n a && rg -n b | head -5", cwd).unwrap(),
-            "rg -H -n a | ctx compact && rg -H -n b | head -5 | ctx compact"
+            "rg -H -n a | ctx compact --fail-empty && rg -H -n b | head -5 | ctx compact"
         );
         assert!(rewrite_command("sed -n '1,2p' a; ls", cwd).is_none());
         assert!(rewrite_command("rg a; rm x > y", cwd).is_none());
@@ -565,19 +640,35 @@ mod tests {
     }
 
     #[test]
-    fn cat_of_a_long_indexed_file_becomes_ctx_read() {
+    fn a_list_is_rewritten_only_when_every_other_command_is_a_plain_read() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
-        fs::create_dir_all(cwd.join(".ctx")).unwrap();
-        fs::write(cwd.join(".ctx/index.sqlite"), b"").unwrap();
-        fs::write(cwd.join("long.rs"), lines(201)).unwrap();
-        fs::write(cwd.join("short.rs"), lines(200)).unwrap();
-        assert_eq!(
-            rewrite_command("cat long.rs", cwd).unwrap(),
-            "ctx read 'long.rs'"
-        );
-        assert!(rewrite_command("cat short.rs", cwd).is_none());
-        assert!(rewrite_command("cat long.rs | head", cwd).is_none());
+        for command in [
+            "rg foo; rm victim",
+            "rg foo && rm victim",
+            "rg foo; bun test",
+            "rg foo; git diff",
+            "rg foo; sed -n '1w /tmp/x' a",
+            "rg foo; sed -n 'e rm x' a",
+            "rg foo; sed -i -n '1p' a",
+            "rg foo; cat --squeeze-blank a",
+            "rg foo | sort -o/tmp/victim",
+            "rg foo | sort -o /tmp/victim",
+            "rg foo | sort --compress-program=sh",
+            "rg foo | sort -T /tmp",
+            "rg foo | uniq - out.txt",
+            "rg foo | head -c 5",
+            "cat a.rs",
+        ] {
+            assert!(rewrite_command(command, cwd).is_none(), "{command:?}");
+        }
+        for command in [
+            "rg foo | sort -k2 -n | uniq -c",
+            "sed -n '10,$p' a.rs && rg foo",
+            "cat a.rs; nl -ba b.rs; head -n 20 c.rs; rg foo",
+        ] {
+            assert!(rewrite_command(command, cwd).is_some(), "{command:?}");
+        }
     }
 
     #[test]
@@ -640,7 +731,7 @@ mod tests {
         let claude = hook_response(&payload, "claude").unwrap();
         assert_eq!(
             claude["hookSpecificOutput"]["updatedInput"]["command"],
-            "rg -H -n foo | ctx compact"
+            "rg -H -n foo | ctx compact --fail-empty"
         );
         assert_eq!(
             claude["hookSpecificOutput"]["updatedInput"]["description"],

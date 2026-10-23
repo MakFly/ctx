@@ -190,6 +190,9 @@ enum Command {
         /// Token budget for matched definition bodies and the lines around other matches (0 disables it).
         #[arg(long, default_value_t = 1_500)]
         expand_tokens: usize,
+        /// Exit 1 when the input is empty, as a search with no match does.
+        #[arg(long)]
+        fail_empty: bool,
     },
     /// Receive a harness lifecycle event and enqueue background work.
     Hook {
@@ -932,9 +935,13 @@ async fn execute(cli: Cli) -> Result<()> {
             max_lines,
             max_line_chars,
             expand_tokens,
+            fail_empty,
         } => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
+            if fail_empty && input.trim().is_empty() {
+                std::process::exit(1);
+            }
             print!(
                 "{}",
                 ctx_code::compact::compact(

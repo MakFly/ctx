@@ -157,7 +157,12 @@ fn expand_definitions(
             let first = numbers[index];
             let mut last = first;
             let mut count = 1;
-            while index + count < numbers.len() && numbers[index + count] <= last + CLUSTER_GAP {
+            let start = first.saturating_sub(WINDOW_BEFORE).max(1);
+            // A group grows while its window still fits: a longer run starts a new one.
+            while index + count < numbers.len()
+                && numbers[index + count] <= last + CLUSTER_GAP
+                && numbers[index + count] + WINDOW_BEFORE < start + MAX_WINDOW_LINES
+            {
                 last = numbers[index + count];
                 count += 1;
             }
@@ -186,7 +191,8 @@ fn expand_definitions(
             .count();
     }
     candidates.sort_by_key(|candidate| (std::cmp::Reverse(candidate.hits), candidate.order));
-    let mut used = 0;
+    // The two section headings count against the budget too.
+    let mut used = estimate_tokens("definitions found:\naround the matches:\n");
     let mut chosen: Vec<(usize, bool, String)> = Vec::new();
     let mut spans: Vec<(String, usize, usize)> = Vec::new();
     for candidate in candidates {
@@ -372,7 +378,7 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
                     scope_line,
                     format!(
                         "{number}{separator}{}",
-                        shorten(text.trim_end(), options.max_line_chars)
+                        shorten(text, options.max_line_chars)
                     ),
                     Some(path),
                 )
