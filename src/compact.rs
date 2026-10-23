@@ -285,14 +285,25 @@ fn expand_definitions(
 }
 
 /// One parsed `path:line:text` match line, or a `path-line-text` context line.
+/// Lines split on LF alone, so a CR before it stays: a name or a line keeps every byte.
+fn split_lf(input: &str) -> impl Iterator<Item = &str> {
+    input
+        .strip_suffix('\n')
+        .unwrap_or(input)
+        .split('\n')
+        .filter({
+            let empty = input.is_empty();
+            move |_| !empty
+        })
+}
+
 /// The lines of `--null` search output. Every real line carries a NUL after its path,
 /// but for a `--` separator when context was asked; any other line is the head of a
 /// file name holding a newline, so it and the record that ends that name are shown as
 /// they are, unattributed (the record's visible path is only the name's tail).
 fn null_records(input: &str, context_separators: bool) -> Vec<(&str, bool)> {
     let mut broken = false;
-    input
-        .lines()
+    split_lf(input)
         .map(|line| {
             if line.contains('\0') {
                 let literal = broken;
@@ -416,7 +427,7 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
             // Split on NUL alone: a listed name may itself hold a newline.
             Some(list) => list.split('\0').map(|name| (name, true)).collect(),
             None if input.contains('\0') => null_records(input, options.context_separators),
-            None => input.lines().map(|line| (line, false)).collect(),
+            None => split_lf(input).map(|line| (line, false)).collect(),
         };
     for (line, literal) in records {
         // `--` only separates context groups; the line numbers already show the gaps.
@@ -786,6 +797,9 @@ mod tests {
             context_separators: false,
             ..CompactOptions::default()
         };
+        // A CR in the name survives too.
+        let crlf = compact("prefix\r\nREADME.md\u{0}1:needle\n", options.clone());
+        assert_eq!(crlf, "prefix\r\nREADME.md:1:needle\n", "{crlf}");
         // The real file is `prefix\nREADME.md`; its visible tail names another file.
         let out = compact("prefix\nREADME.md\u{0}1:needle\n", options.clone());
         assert_eq!(out, "prefix\nREADME.md:1:needle\n", "{out}");
