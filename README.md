@@ -129,6 +129,34 @@ The stdio server exposes `ctx_search`, `ctx_graph`, `ctx_pack` and `ctx_file`.
 Full `ctx_search` sends structured evidence once to protocol 2025-06-18+ clients;
 older clients also receive the text fallback. Compact pack output is unchanged.
 
+### Compact search hooks
+
+An agent's own `rg` and `grep` searches can come back cheaper to read. The
+PreToolUse hook `ctx hook rewrite` turns a search (alone, or in a `;`/`&&` list
+with plain reads: `sed -n 'A,Bp'`, `cat`, `nl`, `head`, `tail`, `wc`) into
+`ctx compact --run -- ...`. ctx checks every step against a known-safe set of
+options, starts it from PATH without a shell, and exits with the status the shell
+would give. Search output is grouped by file, each group of matches is preceded
+by the function holding it (`[function login 40-52]`), and the source the search
+points at follows within a token budget: the matched definitions and the lines
+around the densest groups of matches. Matched lines stay verbatim. Anything else
+(a pipe, a redirect, an expansion, an unknown option) runs untouched.
+
+`ctx install --target claude` adds the hook to `.claude/settings.json`, with a
+PostToolUse hook (`ctx hook compact-output`) that compacts Claude's own Grep
+results the same way. For Codex, add it to `~/.codex/hooks.json`:
+
+```json
+{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [
+  { "type": "command", "command": "ctx hook rewrite --harness codex" } ] } ] } }
+```
+
+Codex applies a rewrite only with an explicit allow, so the hook allows the
+rewritten command: it only ever contains the checked steps above, and a `cd`
+prefix is not rewritten for Codex. `--expand-tokens N` sets the appended-source
+budget (default 1,500; 0 disables it). `ctx compact` also filters any search
+output on stdin: `rg -n login | ctx compact`.
+
 ## Live indexing and freshness
 
 `ctx mcp` watches the repository for its session lifetime. To watch directly:
