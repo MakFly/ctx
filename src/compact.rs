@@ -325,9 +325,9 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
     let mut matches = Vec::new();
     let mut sources = Sources::new();
     // With a root, each group of lines is preceded by the function holding it.
-    let scoped = (options.expand_tokens > 0)
-        .then_some(options.root.as_deref())
-        .flatten();
+    // Even with no budget for source: a scope line costs a few tokens and often answers
+    // "where is this called from" on its own.
+    let scoped = options.root.as_deref();
     let mut scope: Option<usize> = None;
     for line in input.lines() {
         // `--` only separates context groups; the line numbers already show the gaps.
