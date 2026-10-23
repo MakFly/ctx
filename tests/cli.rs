@@ -1146,3 +1146,38 @@ fn compact_run_leaves_formats_it_does_not_read_byte_for_byte() {
         assert_eq!(through.stdout, direct.stdout, "{search:?}");
     }
 }
+
+#[test]
+fn compact_run_keeps_a_nul_ending_matched_text_and_passes_unnumbered_rg_through() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a.txt"), b"needle\0\n").unwrap();
+    let ended = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-a", "needle", "a.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(ended.status.code(), Some(0));
+    assert!(
+        ended.stdout.starts_with(b"a.txt\n1:needle\0\n"),
+        "{:?}",
+        String::from_utf8_lossy(&ended.stdout)
+    );
+    for flag in ["-N", "--no-line-number"] {
+        let direct = std::process::Command::new("rg")
+            .args([flag, "-a", "needle", "a.txt"])
+            .current_dir(temporary.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let through = Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(temporary.path())
+            .args([
+                "compact", "--run", "--", "rg", flag, "-a", "needle", "a.txt",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(through.stdout, direct.stdout, "{flag}");
+    }
+}

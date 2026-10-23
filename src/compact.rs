@@ -20,6 +20,9 @@ pub struct CompactOptions {
     /// for context lines). In `--null` output any other line without a NUL is part of
     /// a file name holding a newline.
     pub context_separators: bool,
+    /// Whether output ending in a NUL may be a `-l --null` file list. Under `--run`
+    /// lists never reach the compactor, so a final NUL there belongs to matched text.
+    pub null_lists: bool,
 }
 
 impl Default for CompactOptions {
@@ -30,6 +33,7 @@ impl Default for CompactOptions {
             expand_tokens: 0,
             root: None,
             context_separators: true,
+            null_lists: true,
         }
     }
 }
@@ -437,15 +441,18 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
     let mut scope: Option<usize> = None;
     // A NUL-separated file list (`-l --null`) is one record per name, each shown as is:
     // a name is never read as a match, and each counts against the line limit.
-    let records: Vec<(&str, bool)> =
-        match input.strip_suffix('\n').unwrap_or(input).strip_suffix('\0') {
-            // Split on NUL alone: a listed name may itself hold a newline.
-            Some(list) => list.split('\0').map(|name| (name, true)).collect(),
-            None if input.contains('\0') => {
-                null_records(input, options.context_separators, options.root.as_deref())
-            }
-            None => split_lf(input).map(|line| (line, false)).collect(),
-        };
+    let list = options
+        .null_lists
+        .then(|| input.strip_suffix('\n').unwrap_or(input).strip_suffix('\0'))
+        .flatten();
+    let records: Vec<(&str, bool)> = match list {
+        // Split on NUL alone: a listed name may itself hold a newline.
+        Some(list) => list.split('\0').map(|name| (name, true)).collect(),
+        None if input.contains('\0') => {
+            null_records(input, options.context_separators, options.root.as_deref())
+        }
+        None => split_lf(input).map(|line| (line, false)).collect(),
+    };
     for (line, literal) in records {
         // `--` only separates context groups; the line numbers already show the gaps.
         if !literal && line == "--" {

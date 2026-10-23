@@ -94,8 +94,8 @@ const RUN_SEPARATORS: [&str; 2] = [RUN_AND, RUN_THEN];
 /// A search as `ctx compact --run` starts it to compact its output, and whether ctx added
 /// `--null`: `-H`, `--null` and `-n` are added when missing, so every line carries its
 /// path (ended by a NUL: no file name can be misread) and its number. `None` for output
-/// ctx compact does not read (file lists, counts, quiet searches, no path per line, a
-/// heading, forced colour): `--run` passes that through as the search wrote it.
+/// ctx compact does not read (file lists, counts, quiet searches, no path or no number
+/// per line, a heading, forced colour): `--run` passes that through as the search wrote it.
 pub fn normalize_search(words: &[String]) -> Option<(Vec<String>, bool)> {
     let (program, arguments) = words.split_first()?;
     let (shorts, longs) = search_flags(program, arguments)?;
@@ -116,7 +116,8 @@ pub fn normalize_search(words: &[String]) -> Option<(Vec<String>, bool)> {
             }
         }
     });
-    if lists_or_counts(program, &shorts, &longs) || no_path || forced_colour {
+    let no_number = program == "rg" && (shorts.contains('N') || long("--no-line-number"));
+    if lists_or_counts(program, &shorts, &longs) || no_path || no_number || forced_colour {
         return None;
     }
     let mut out = vec![program.clone()];
@@ -128,8 +129,7 @@ pub fn normalize_search(words: &[String]) -> Option<(Vec<String>, bool)> {
     if added_null {
         out.push("--null".to_owned());
     }
-    let unnumbered = program == "rg" && (shorts.contains('N') || long("--no-line-number"));
-    if !(shorts.contains('n') || long("--line-number") || unnumbered) {
+    if !(shorts.contains('n') || long("--line-number")) {
         out.push("-n".to_owned());
     }
     out.extend(arguments.iter().cloned());
@@ -930,7 +930,8 @@ mod tests {
                 Some("grep -rnH --null foo ."),
                 false,
             ),
-            ("rg -N foo", Some("rg -H --null -N foo"), true),
+            ("rg -N foo", None, false),
+            ("rg --no-line-number foo", None, false),
             ("rg -L foo", Some("rg -H --null -n -L foo"), true),
             (
                 "rg --color=never foo",

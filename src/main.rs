@@ -952,8 +952,10 @@ async fn execute(cli: Cli) -> Result<()> {
                 max_line_chars: max_line_chars.max(1),
                 expand_tokens,
                 root: std::env::current_dir().ok(),
-                // Stdin: the search is unknown, so a `--` line may be a separator.
+                // Stdin: the search is unknown, so a `--` line may be a separator and
+                // output ending in a NUL may be a file list.
                 context_separators: true,
+                null_lists: true,
             };
             if !run {
                 let mut input = String::new();
@@ -1786,6 +1788,7 @@ fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> R
     };
     let mut options = options;
     options.context_separators = ctx_code::hook_rewrite::uses_context(words);
+    options.null_lists = false;
     let words = normalized;
     let mut child = match spawn_step(&words, std::process::Stdio::piped())? {
         Ok(child) => child,
