@@ -1,11 +1,12 @@
 //! PreToolUse hook that makes a few shell commands cheaper to read without changing what they do.
 //!
-//! A bare search (`rg` or `grep` with options from a known safe set) runs under
-//! `ctx compact --run`, which runs it unchanged, groups its matches by file, bounds the output
-//! and exits with the search's own status. For Claude, a list is rewritten when every other
-//! command in it is a plain read; Codex runs the rewritten command without asking, so there only
-//! a lone search is. Anything else (a pipe, a redirect, an expansion) runs untouched; the hook
-//! never blocks.
+//! A search (`rg` or `grep` with options from a known safe set), alone or in a `;`/`&&` list
+//! with plain reads (`sed -n 'A,Bp'`, `cat`, `nl`, `head`, `tail`, `wc`, `pwd`), becomes
+//! `ctx compact --run -- ...`: ctx starts each step itself from PATH, without a shell, prints
+//! reads as is and searches grouped by file with the source they point at, and exits with the
+//! status the shell would give. Codex runs the rewrite without asking, which is why every step
+//! is checked again before it starts. Anything else (a pipe, a redirect, an expansion) runs
+//! untouched; the hook never blocks.
 
 use std::path::{Path, PathBuf};
 
@@ -30,32 +31,95 @@ pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {
     if directory.is_some() && !effective.is_dir() {
         return None;
     }
-    // A list `a; b && c`: each search in it is compacted; any other command must be a
-    // plain read, or the whole list is left alone.
+    // A list `a; b && c` of searches and plain reads: ctx runs every step itself, from
+    // PATH and without a shell, keeping `&&` and `;` and the last step's status.
     let segments = split_list(rest)?;
-    let mut changed = false;
-    let mut out = String::new();
-    for (segment, separator) in &segments {
-        match rewrite_search_pipeline(segment) {
-            Some(rewritten) => {
-                changed = true;
-                out.push_str(&rewritten);
-            }
-            None => {
-                let words = tokenize(segment)?;
-                if split_pipeline(segment)?.len() != 1 || !is_plain_read(&words) {
-                    return None;
-                }
-                out.push_str(segment.trim_end_matches(BLANKS));
-            }
+    let mut words = Vec::new();
+    let mut searched = false;
+    for (index, (segment, separator)) in segments.iter().enumerate() {
+        if split_pipeline(segment)?.len() != 1 {
+            return None;
         }
-        out.push_str(separator);
+        let step = tokenize(segment)?;
+        let (program, arguments) = step.split_first()?;
+        if step
+            .iter()
+            .any(|word| RUN_SEPARATORS.contains(&word.as_str()))
+        {
+            return None;
+        }
+        if is_search(program, arguments) {
+            searched = true;
+            // `-H` prints the path even for a single file, so the lines parse and
+            // the source around them can be appended.
+            words.push(program.clone());
+            words.push("-H".to_owned());
+            words.extend(arguments.iter().cloned());
+        } else if is_plain_read(&step) {
+            words.extend(step.iter().cloned());
+        } else {
+            return None;
+        }
+        match separator.trim_matches(BLANKS) {
+            "&&" if index + 1 < segments.len() => words.push(RUN_AND.to_owned()),
+            ";" if index + 1 < segments.len() => words.push(RUN_THEN.to_owned()),
+            ";" | "" => {}
+            _ => return None,
+        }
     }
-    changed.then(|| format!("{prefix}{out}"))
+    let run = words
+        .iter()
+        .map(|word| shell_word(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    searched.then(|| format!("{prefix}ctx compact --run -- {run}"))
 }
 
-/// A command that only prints files or directory names: `sed -n 'A,Bp'`, `cat`, `nl`,
-/// `head`/`tail -n N`, `wc`, `ls`, `pwd`, with no option that writes or runs anything.
+/// Separators of a `ctx compact --run` list: `&&` and `;`.
+pub const RUN_AND: &str = "--and";
+pub const RUN_THEN: &str = "--then";
+const RUN_SEPARATORS: [&str; 2] = [RUN_AND, RUN_THEN];
+
+/// One step of a `ctx compact --run` list.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RunStep {
+    /// An `rg` or `grep` search, compacted.
+    Search(Vec<String>),
+    /// A plain read, printed as is.
+    Read(Vec<String>),
+}
+
+/// The steps of a `ctx compact --run` list, each with whether it runs only after a
+/// success (`&&`); `None` when a step is neither a known-safe search nor a plain read.
+pub fn parse_run(words: &[String]) -> Option<Vec<(bool, RunStep)>> {
+    let mut steps = Vec::new();
+    let (mut start, mut after_and) = (0, false);
+    for index in 0..=words.len() {
+        let separator = words
+            .get(index)
+            .map(String::as_str)
+            .filter(|word| RUN_SEPARATORS.contains(word));
+        if index < words.len() && separator.is_none() {
+            continue;
+        }
+        let part = &words[start..index];
+        let (program, arguments) = part.split_first()?;
+        let step = if is_search(program, arguments) {
+            RunStep::Search(part.to_vec())
+        } else if is_plain_read(part) {
+            RunStep::Read(part.to_vec())
+        } else {
+            return None;
+        };
+        steps.push((after_and, step));
+        after_and = separator == Some(RUN_AND);
+        start = index + 1;
+    }
+    Some(steps)
+}
+
+/// A command that only prints files: `sed -n 'A,Bp'`, `cat`, `nl`, `head`/`tail -n N`,
+/// `wc`, `pwd`, with no option that writes or runs anything.
 fn is_plain_read(words: &[String]) -> bool {
     let Some((program, arguments)) = words.split_first() else {
         return false;
@@ -80,7 +144,6 @@ fn is_plain_read(words: &[String]) -> bool {
         "cat" => operands_only(&["-n"]),
         "nl" => operands_only(&["-ba"]),
         "wc" => operands_only(&["-l", "-c", "-w"]),
-        "ls" => operands_only(&["-l", "-a", "-la", "-al", "-1", "-R"]),
         "pwd" => arguments.is_empty(),
         "head" | "tail" => count_options(arguments).is_some(),
         _ => false,
@@ -139,33 +202,6 @@ fn count_options(arguments: &[String]) -> Option<Vec<&String>> {
         index += 1;
     }
     Some(operands)
-}
-
-/// `search [| filter]...` followed by ` | ctx compact`, or `None`.
-fn rewrite_search_pipeline(command: &str) -> Option<String> {
-    let stages = split_pipeline(command)?
-        .into_iter()
-        .map(tokenize)
-        .collect::<Option<Vec<_>>>()?;
-    let (first, filters) = stages.split_first()?;
-    let (program, arguments) = first.split_first()?;
-    // A filter after the search would make the pipeline's status its own (or a pipefail
-    // mix the hook cannot see): only a bare search is rewritten, its status kept exactly.
-    if !filters.is_empty() || !is_search(program, arguments) {
-        return None;
-    }
-    // `-H` prints the path even for a single file, so the lines parse and the
-    // source around them can be appended.
-    let mut words = vec![program.clone(), "-H".to_owned()];
-    words.extend(arguments.iter().cloned());
-    let search = words
-        .iter()
-        .map(|word| shell_word(word))
-        .collect::<Vec<_>>()
-        .join(" ");
-    // `ctx compact --run` runs the search itself and exits with its status, so
-    // `rg -q x && y` gates `y` exactly as before.
-    Some(format!("ctx compact --run -- {search}"))
 }
 
 /// `word` as one shell word: bare when it holds only safe characters, else single-quoted.
@@ -462,13 +498,10 @@ pub fn hook_response(payload: &Value, harness: &str) -> Option<Value> {
         _ => std::env::current_dir().ok()?,
     };
     // Codex runs the rewritten command without asking (it applies `updatedInput` only with
-    // an explicit allow): only one bare search, which `ctx compact --run` starts from PATH
-    // itself, no shell list whose other commands would go through aliases or functions.
-    if harness == "codex" {
-        let (_, directory, rest) = split_cd_prefix(command)?;
-        if directory.is_some() || split_list(rest)?.len() != 1 {
-            return None;
-        }
+    // an explicit allow): no `cd` prefix, which the shell would still run, only what
+    // `ctx compact --run` starts itself from PATH after checking every step.
+    if harness == "codex" && split_cd_prefix(command)?.1.is_some() {
+        return None;
     }
     let rewritten = rewrite_command(command, &cwd)?;
     let mut updated = tool_input.clone();
@@ -711,26 +744,46 @@ mod tests {
     }
 
     #[test]
-    fn codex_gets_only_a_lone_search_since_it_runs_it_without_asking() {
+    fn codex_gets_no_cd_prefix_since_it_runs_the_rewrite_without_asking() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         let payload = |command: &str| json!({"tool_name": "Bash", "cwd": dir.path(), "tool_input": {"command": command}});
-        for command in [
-            "sed -n '1,2p' a.rs; rg foo",
-            "cd src && rg foo",
-            "rg a && rg b",
-        ] {
+        // The shell would still run the `cd`: Codex does not get it, Claude may.
+        assert!(hook_response(&payload("cd src && rg foo"), "codex").is_none());
+        assert!(hook_response(&payload("cd src && rg foo"), "claude").is_some());
+        for command in ["rg foo", "sed -n '1,2p' a.rs; rg foo", "rg a && rg b"] {
+            let out = hook_response(&payload(command), "codex").unwrap();
+            assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
+            let rewritten = out["hookSpecificOutput"]["updatedInput"]["command"]
+                .as_str()
+                .unwrap();
             assert!(
-                hook_response(&payload(command), "codex").is_none(),
-                "{command}"
-            );
-            assert!(
-                hook_response(&payload(command), "claude").is_some(),
-                "{command}"
+                rewritten.starts_with("ctx compact --run -- "),
+                "{rewritten}"
             );
         }
-        let out = hook_response(&payload("rg foo"), "codex").unwrap();
-        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    #[test]
+    fn a_run_list_is_parsed_into_checked_steps_with_their_operators() {
+        let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            parse_run(&words("sed -n 1,2p a.rs --and rg -H foo --then cat b.rs")).unwrap(),
+            vec![
+                (false, RunStep::Read(words("sed -n 1,2p a.rs"))),
+                (true, RunStep::Search(words("rg -H foo"))),
+                (false, RunStep::Read(words("cat b.rs"))),
+            ]
+        );
+        for refused in [
+            "sh -c true",
+            "rg --pre=sh foo",
+            "rg foo --and",
+            "--then rg foo",
+            "rm x",
+        ] {
+            assert!(parse_run(&words(refused)).is_none(), "{refused}");
+        }
     }
 
     #[test]
@@ -803,16 +856,20 @@ mod tests {
         let cwd = dir.path();
         assert_eq!(
             rewrite_command("sed -n '1,20p' a.rs; rg -n foo src", cwd).unwrap(),
-            "sed -n '1,20p' a.rs; ctx compact --run -- rg -H -n foo src"
+            "ctx compact --run -- sed -n 1,20p a.rs --then rg -H -n foo src"
         );
         assert_eq!(
             rewrite_command("rg -n a && rg -n b", cwd).unwrap(),
-            "ctx compact --run -- rg -H -n a && ctx compact --run -- rg -H -n b"
+            "ctx compact --run -- rg -H -n a --and rg -H -n b"
         );
         // A filtered search makes the pipeline's status the filter's: left alone.
         assert!(rewrite_command("rg -n a && rg -n b | head -5", cwd).is_none());
         assert!(rewrite_command("rg -n foo src | head -160", cwd).is_none());
         assert!(rewrite_command("sed -n '1,2p' a; ls", cwd).is_none());
+        // A word equal to a run separator would be misread: left alone.
+        assert!(rewrite_command("rg -- --and src", cwd).is_none());
+        // Only plain reads and no search: nothing to compact.
+        assert!(rewrite_command("cat a.rs; sed -n '1,2p' b.rs", cwd).is_none());
         assert!(rewrite_command("rg a; rm x > y", cwd).is_none());
         assert!(rewrite_command("rg a & rg b", cwd).is_none());
         assert!(rewrite_command("rg a || rg b", cwd).is_none());

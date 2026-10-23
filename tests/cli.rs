@@ -899,3 +899,32 @@ fn hook_rewrite_leaves_rg_alone_when_an_rg_config_file_is_set() {
         .unwrap();
     assert!(String::from_utf8_lossy(&plain.stdout).contains("ctx compact --run -- rg -H foo"));
 }
+
+#[test]
+fn compact_run_runs_a_list_like_the_shell_keeping_and_and_then() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    let run = |words: &[&str]| {
+        Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(temporary.path())
+            .args(["compact", "--run", "--"])
+            .args(words)
+            .output()
+            .unwrap()
+    };
+    // The read prints as is, the search compacted, in order.
+    let both = run(&[
+        "sed", "-n", "1p", "a.txt", "--then", "grep", "-H", "-n", "beta", "a.txt",
+    ]);
+    assert_eq!(both.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&both.stdout).starts_with("alpha\na.txt\n2:beta\n"));
+    // A failed search stops an `--and` chain, and its status is the list's.
+    let stopped = run(&["grep", "-q", "gamma", "a.txt", "--and", "cat", "a.txt"]);
+    assert_eq!(stopped.status.code(), Some(1));
+    assert!(stopped.stdout.is_empty());
+    // `--then` runs the next step anyway; the last step's status wins.
+    let then = run(&["grep", "-q", "gamma", "a.txt", "--then", "cat", "a.txt"]);
+    assert_eq!(then.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&then.stdout), "alpha\nbeta\n");
+}

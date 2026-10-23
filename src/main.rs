@@ -941,66 +941,39 @@ async fn execute(cli: Cli) -> Result<()> {
             run,
             search,
         } => {
-            let mut input = String::new();
-            let mut status = None;
-            if run {
-                // The search keeps the caller's stdin and stderr; only its output is compacted.
-                let (program, arguments) = search.split_first().context("--run needs a search")?;
-                // A search runner, not a process runner: `rg` or `grep`, found on PATH.
-                if !matches!(program.as_str(), "rg" | "grep") {
-                    bail!("--run runs rg or grep only, not {program}");
-                }
-                let child = std::process::Command::new(program)
-                    .args(arguments)
-                    .stdin(std::process::Stdio::inherit())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::inherit())
-                    .spawn();
-                let mut child = match child {
-                    Ok(child) => child,
-                    // As the shell reports it: 127 when not found, 126 when not runnable.
-                    Err(error) => {
-                        let (code, what) = match error.kind() {
-                            io::ErrorKind::NotFound => (127, "command not found"),
-                            _ => (126, "cannot execute"),
-                        };
-                        eprintln!("ctx: {program}: {what}");
-                        std::process::exit(code);
-                    }
-                };
-                // At most RUN_OUTPUT_BYTES are kept (compaction shows far less); the rest is
-                // read and dropped so the search never blocks on a full pipe.
-                let mut kept = Vec::new();
-                let mut stdout = child.stdout.take().context("search stdout")?;
-                stdout
-                    .by_ref()
-                    .take(RUN_OUTPUT_BYTES)
-                    .read_to_end(&mut kept)?;
-                io::copy(&mut stdout, &mut io::sink())?;
-                let exit = child.wait()?;
-                input = String::from_utf8_lossy(&kept).into_owned();
-                // A search killed by a signal reports 128 + signal, as the shell would.
-                status = Some(exit.code().unwrap_or_else(|| exit_signal(&exit)));
-            } else {
+            let options = ctx_code::compact::CompactOptions {
+                max_lines: max_lines.max(1),
+                max_line_chars: max_line_chars.max(1),
+                expand_tokens,
+                root: std::env::current_dir().ok(),
+            };
+            if !run {
+                let mut input = String::new();
                 io::stdin().read_to_string(&mut input)?;
+                print!("{}", ctx_code::compact::compact(&input, options));
+                return Ok(());
             }
-            print!(
-                "{}",
-                ctx_code::compact::compact(
-                    &input,
-                    ctx_code::compact::CompactOptions {
-                        max_lines: max_lines.max(1),
-                        max_line_chars: max_line_chars.max(1),
-                        expand_tokens,
-                        root: std::env::current_dir().ok(),
-                    }
-                )
-            );
-            if let Some(code) = status {
+            // A search runner, not a process runner: known-safe rg/grep searches and plain
+            // reads only, each started from PATH without a shell.
+            let steps = ctx_code::hook_rewrite::parse_run(&search).with_context(|| {
+                "--run runs rg or grep only, with plain reads (sed -n, cat, nl, head, tail, wc, pwd) joined by --and or --then"
+            })?;
+            let mut last = 0;
+            for (after_and, step) in steps {
+                // `a && b`: b runs only after a succeeded; `a; b` runs b anyway.
+                if after_and && last != 0 {
+                    continue;
+                }
                 io::stdout().flush()?;
-                std::process::exit(code);
+                last = match step {
+                    ctx_code::hook_rewrite::RunStep::Search(words) => {
+                        run_search(&words, options.clone())?
+                    }
+                    ctx_code::hook_rewrite::RunStep::Read(words) => run_read(&words)?,
+                };
             }
-            Ok(())
+            io::stdout().flush()?;
+            std::process::exit(last);
         }
         Command::Hook { command } => execute_hook(command),
         Command::Embeddings { command } => execute_embeddings(command),
@@ -1749,6 +1722,68 @@ fn emit_envelope(
 fn emit(value: &impl Serialize, _as_json: bool) -> Result<()> {
     println!("{}", render_json(value, io::stdout().is_terminal())?);
     Ok(())
+}
+
+/// Starts one `--run` step from PATH, or reports its shell status (127 not found,
+/// 126 not runnable) when it cannot start.
+fn spawn_step(
+    words: &[String],
+    stdout: std::process::Stdio,
+) -> Result<std::result::Result<std::process::Child, i32>> {
+    let (program, arguments) = words.split_first().context("empty --run step")?;
+    match std::process::Command::new(program)
+        .args(arguments)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(stdout)
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => Ok(Ok(child)),
+        Err(error) => {
+            let (code, what) = match error.kind() {
+                io::ErrorKind::NotFound => (127, "command not found"),
+                _ => (126, "cannot execute"),
+            };
+            eprintln!("ctx: {program}: {what}");
+            Ok(Err(code))
+        }
+    }
+}
+
+/// The shell status of a finished step: its code, or 128 + the signal that killed it.
+fn step_status(exit: std::process::ExitStatus) -> i32 {
+    exit.code().unwrap_or_else(|| exit_signal(&exit))
+}
+
+/// Runs one search and prints its compacted output; returns its status.
+fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> Result<i32> {
+    let mut child = match spawn_step(words, std::process::Stdio::piped())? {
+        Ok(child) => child,
+        Err(code) => return Ok(code),
+    };
+    // At most RUN_OUTPUT_BYTES are kept (compaction shows far less); the rest is read
+    // and dropped so the search never blocks on a full pipe.
+    let mut kept = Vec::new();
+    let mut stdout = child.stdout.take().context("search stdout")?;
+    stdout
+        .by_ref()
+        .take(RUN_OUTPUT_BYTES)
+        .read_to_end(&mut kept)?;
+    io::copy(&mut stdout, &mut io::sink())?;
+    let exit = child.wait()?;
+    print!(
+        "{}",
+        ctx_code::compact::compact(&String::from_utf8_lossy(&kept), options)
+    );
+    Ok(step_status(exit))
+}
+
+/// Runs one plain read with its output straight to ours; returns its status.
+fn run_read(words: &[String]) -> Result<i32> {
+    match spawn_step(words, std::process::Stdio::inherit())? {
+        Ok(mut child) => Ok(step_status(child.wait()?)),
+        Err(code) => Ok(code),
+    }
 }
 
 /// Search output kept by `ctx compact --run` before the rest is dropped.
