@@ -956,7 +956,7 @@ async fn execute(cli: Cli) -> Result<()> {
             // A search runner, not a process runner: known-safe rg/grep searches and plain
             // reads only, each started from PATH without a shell.
             let steps = ctx_code::hook_rewrite::parse_run(&search).with_context(|| {
-                "--run runs rg or grep only, with plain reads (sed -n, cat, nl, head, tail, wc, pwd) joined by --and or --then"
+                "--run runs rg or grep only, with plain reads (sed -n, cat, nl, head, tail, wc) joined by --and or --then"
             })?;
             let mut last = 0;
             for (after_and, step) in steps {

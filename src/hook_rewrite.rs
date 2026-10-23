@@ -1,7 +1,7 @@
 //! PreToolUse hook that makes a few shell commands cheaper to read without changing what they do.
 //!
 //! A search (`rg` or `grep` with options from a known safe set), alone or in a `;`/`&&` list
-//! with plain reads (`sed -n 'A,Bp'`, `cat`, `nl`, `head`, `tail`, `wc`, `pwd`), becomes
+//! with plain reads (`sed -n 'A,Bp'`, `cat`, `nl`, `head`, `tail`, `wc`), becomes
 //! `ctx compact --run -- ...`: ctx starts each step itself from PATH, without a shell, prints
 //! reads as is and searches grouped by file with the source they point at, and exits with the
 //! status the shell would give. Codex runs the rewrite without asking, which is why every step
@@ -45,6 +45,7 @@ pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {
         if step
             .iter()
             .any(|word| RUN_SEPARATORS.contains(&word.as_str()))
+            || (index + 1 < segments.len() && step.iter().any(|word| word == "--"))
         {
             return None;
         }
@@ -103,6 +104,11 @@ pub fn parse_run(words: &[String]) -> Option<Vec<(bool, RunStep)>> {
             continue;
         }
         let part = &words[start..index];
+        // After `--` a separator-looking word could be an operand: such a step must end
+        // the list, so no word after its `--` is ever read as a separator.
+        if separator.is_some() && part.iter().any(|word| word == "--") {
+            return None;
+        }
         let (program, arguments) = part.split_first()?;
         let step = if is_search(program, arguments) {
             RunStep::Search(part.to_vec())
@@ -119,7 +125,8 @@ pub fn parse_run(words: &[String]) -> Option<Vec<(bool, RunStep)>> {
 }
 
 /// A command that only prints files: `sed -n 'A,Bp'`, `cat`, `nl`, `head`/`tail -n N`,
-/// `wc`, `pwd`, with no option that writes or runs anything.
+/// `wc`, with no option that writes or runs anything. (`pwd` is not one: the external
+/// program prints the physical directory where the shell builtin prints the logical one.)
 fn is_plain_read(words: &[String]) -> bool {
     let Some((program, arguments)) = words.split_first() else {
         return false;
@@ -144,7 +151,6 @@ fn is_plain_read(words: &[String]) -> bool {
         "cat" => operands_only(&["-n"]),
         "nl" => operands_only(&["-ba"]),
         "wc" => operands_only(&["-l", "-c", "-w"]),
-        "pwd" => arguments.is_empty(),
         "head" | "tail" => count_options(arguments).is_some(),
         _ => false,
     }
@@ -492,7 +498,11 @@ pub fn hook_response(payload: &Value, harness: &str) -> Option<Value> {
         return None;
     }
     let tool_input = payload.get("tool_input")?.as_object()?;
-    let command = tool_input.get("command")?.as_str()?;
+    // Bash and shell send `command`; exec_command sends `cmd`: the same field is rewritten.
+    let field = ["command", "cmd"]
+        .into_iter()
+        .find(|field| tool_input.get(*field).is_some_and(Value::is_string))?;
+    let command = tool_input.get(field)?.as_str()?;
     let cwd = match payload.get("cwd").and_then(Value::as_str) {
         Some(cwd) if !cwd.is_empty() => PathBuf::from(cwd),
         _ => std::env::current_dir().ok()?,
@@ -505,7 +515,7 @@ pub fn hook_response(payload: &Value, harness: &str) -> Option<Value> {
     }
     let rewritten = rewrite_command(command, &cwd)?;
     let mut updated = tool_input.clone();
-    updated.insert("command".to_owned(), Value::String(rewritten));
+    updated.insert(field.to_owned(), Value::String(rewritten));
     let mut output = json!({
         "hookEventName": "PreToolUse",
         "permissionDecisionReason": "ctx: bounded output",
@@ -748,6 +758,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         let payload = |command: &str| json!({"tool_name": "Bash", "cwd": dir.path(), "tool_input": {"command": command}});
+        // exec_command sends `cmd`: that field is the one rewritten.
+        let exec = json!({"tool_name": "exec_command", "cwd": dir.path(), "tool_input": {"cmd": "rg foo"}});
+        let out = hook_response(&exec, "codex").unwrap();
+        assert_eq!(
+            out["hookSpecificOutput"]["updatedInput"]["cmd"],
+            "ctx compact --run -- rg -H foo"
+        );
+        assert!(
+            out["hookSpecificOutput"]["updatedInput"]
+                .get("command")
+                .is_none()
+        );
         // The shell would still run the `cd`: Codex does not get it, Claude may.
         assert!(hook_response(&payload("cd src && rg foo"), "codex").is_none());
         assert!(hook_response(&payload("cd src && rg foo"), "claude").is_some());
@@ -779,6 +801,9 @@ mod tests {
             "sh -c true",
             "rg --pre=sh foo",
             "rg foo --and",
+            "pwd",
+            "grep -- --then pwd",
+            "grep -- x a --and cat b",
             "--then rg foo",
             "rm x",
         ] {
@@ -868,6 +893,10 @@ mod tests {
         assert!(rewrite_command("sed -n '1,2p' a; ls", cwd).is_none());
         // A word equal to a run separator would be misread: left alone.
         assert!(rewrite_command("rg -- --and src", cwd).is_none());
+        // After `--` a later separator could be an operand: such a search must come last.
+        assert!(rewrite_command("rg -- x src && cat a.rs", cwd).is_none());
+        assert!(rewrite_command("cat a.rs && rg -- x src", cwd).is_some());
+        assert!(rewrite_command("pwd; rg foo", cwd).is_none());
         // Only plain reads and no search: nothing to compact.
         assert!(rewrite_command("cat a.rs; sed -n '1,2p' b.rs", cwd).is_none());
         assert!(rewrite_command("rg a; rm x > y", cwd).is_none());
