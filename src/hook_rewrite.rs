@@ -101,26 +101,10 @@ pub fn normalize_search(words: &[String]) -> Vec<String> {
     let Some((shorts, longs)) = search_flags(program, arguments) else {
         return words.to_vec();
     };
-    let long = |name: &str| longs.iter().any(|flag| flag == name);
-    // `rg -L` follows links; for grep it lists files without a match.
-    let listing_letters = if program == "grep" { "lLcq" } else { "lcq" };
-    let listing = shorts
-        .chars()
-        .any(|letter| listing_letters.contains(letter))
-        || [
-            "--files-with-matches",
-            "--files-without-match",
-            "--count",
-            "--count-matches",
-            "--files",
-            "--quiet",
-            "--silent",
-        ]
-        .into_iter()
-        .any(long);
-    if listing {
+    if lists_or_counts(program, &shorts, &longs) {
         return words.to_vec();
     }
+    let long = |name: &str| longs.iter().any(|flag| flag == name);
     let mut out = vec![program.clone()];
     if !(shorts.contains('H') || long("--with-filename")) {
         out.push("-H".to_owned());
@@ -134,6 +118,33 @@ pub fn normalize_search(words: &[String]) -> Vec<String> {
     }
     out.extend(arguments.iter().cloned());
     out
+}
+
+/// A search printing file names, counts or nothing (`-l`, `--files`, `-c`, `-q`...):
+/// its output is not `path:line:text`, so `ctx compact --run` prints it as is.
+pub fn is_listing(words: &[String]) -> bool {
+    words.split_first().is_some_and(|(program, arguments)| {
+        search_flags(program, arguments)
+            .is_some_and(|(shorts, longs)| lists_or_counts(program, &shorts, &longs))
+    })
+}
+
+fn lists_or_counts(program: &str, shorts: &str, longs: &[String]) -> bool {
+    // `rg -L` follows links; for grep it lists files without a match.
+    let letters = if program == "grep" { "lLcq" } else { "lcq" };
+    shorts.chars().any(|letter| letters.contains(letter))
+        || longs.iter().any(|flag| {
+            matches!(
+                flag.as_str(),
+                "--files-with-matches"
+                    | "--files-without-match"
+                    | "--count"
+                    | "--count-matches"
+                    | "--files"
+                    | "--quiet"
+                    | "--silent"
+            )
+        })
 }
 
 /// One step of a `ctx compact --run` list.

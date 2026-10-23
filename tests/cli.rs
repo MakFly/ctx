@@ -965,3 +965,32 @@ fn compact_run_runs_a_quiet_rg_as_written() {
     assert!(found.stdout.is_empty());
     assert_eq!(run("gamma").status.code(), Some(1));
 }
+
+#[test]
+fn compact_run_prints_file_lists_as_the_search_wrote_them() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("--"), "x\n").unwrap();
+    fs::write(temporary.path().join("a:1:foo"), "x\n").unwrap();
+    // With no path and a piped stdin rg would search stdin: name the directory.
+    for listing in [
+        &["--files", "."][..],
+        &["-l", "x", "."][..],
+        &["-l", "--null", "x", "."][..],
+    ] {
+        let output = Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(temporary.path())
+            .args(["compact", "--run", "--", "rg", "--sort", "path"])
+            .args(listing)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).replace('\0', "\n");
+        let mut names: Vec<_> = text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.trim_start_matches("./"))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["--", "a:1:foo"], "{listing:?}");
+    }
+}

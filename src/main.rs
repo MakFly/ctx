@@ -1792,10 +1792,14 @@ fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> R
         .read_to_end(&mut kept)?;
     let dropped = io::copy(&mut stdout, &mut io::sink())?;
     let exit = child.wait()?;
-    print!(
-        "{}",
-        ctx_code::compact::compact(&String::from_utf8_lossy(&kept), options)
-    );
+    let text = String::from_utf8_lossy(&kept);
+    // File names and counts are printed as the search wrote them: they are not
+    // `path:line:text`, and a name must never be read as a match.
+    if ctx_code::hook_rewrite::is_listing(&words) {
+        print!("{text}");
+    } else {
+        print!("{}", ctx_code::compact::compact(&text, options));
+    }
     if dropped > 0 {
         println!("... {dropped} more bytes of search output not read; narrow the search");
     }
