@@ -237,14 +237,14 @@ fn explore_refreshes_git_and_non_git_sources_before_reusing_briefings() {
             );
             serde_json::from_slice::<Value>(&result.stdout).unwrap()
         };
-        fs::write(root.join("a.py"), "def alpha():\n    return 'old'\n").unwrap();
+        fs::write(root.join("a.py"), "def alpha(old):\n    return old\n").unwrap();
         if git {
             commit();
         }
         let old = explore();
         fs::write(
             root.join("a.py"),
-            "def alpha():\n    return 'new content'\n",
+            "def alpha(new_content):\n    return new_content\n",
         )
         .unwrap();
         if git {
@@ -252,10 +252,12 @@ fn explore_refreshes_git_and_non_git_sources_before_reusing_briefings() {
         }
         let new = explore();
         assert!(
-            new["hits"][0]["snippet"]
+            // explore strips definitions to their signature, so the refreshed
+            // source must show through the signature.
+            new["hits"][0]["sig"]
                 .as_str()
                 .unwrap()
-                .contains("new content")
+                .contains("new_content")
         );
         assert_ne!(old["cache_key"], new["cache_key"]);
         assert_eq!(explore()["skipped"], true);
