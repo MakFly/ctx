@@ -2,9 +2,10 @@
 //!
 //! A bare search (`rg` or `grep` with options from a known safe set) runs under
 //! `ctx compact --run`, which runs it unchanged, groups its matches by file, bounds the output
-//! and exits with the search's own status. A list is rewritten only when every other command
-//! in it is a plain read, since Codex runs the rewritten command without asking. Anything else
-//! (a pipe, a redirect, an expansion) runs untouched; the hook never blocks.
+//! and exits with the search's own status. For Claude, a list is rewritten when every other
+//! command in it is a plain read; Codex runs the rewritten command without asking, so there only
+//! a lone search is. Anything else (a pipe, a redirect, an expansion) runs untouched; the hook
+//! never blocks.
 
 use std::path::{Path, PathBuf};
 
@@ -169,7 +170,9 @@ fn rewrite_search_pipeline(command: &str) -> Option<String> {
 
 /// `word` as one shell word: bare when it holds only safe characters, else single-quoted.
 fn shell_word(word: &str) -> String {
+    // A leading `=` expands to a program path in zsh (`=ls`): it is quoted too.
     if !word.is_empty()
+        && !word.starts_with('=')
         && word
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"_./=:,+@%-".contains(&byte))
@@ -454,6 +457,21 @@ pub fn hook_response(payload: &Value, harness: &str) -> Option<Value> {
         Some(cwd) if !cwd.is_empty() => PathBuf::from(cwd),
         _ => std::env::current_dir().ok()?,
     };
+    // An rg config file may add `--pre` and friends, which the option check cannot see.
+    if std::env::var_os("RIPGREP_CONFIG_PATH").is_some_and(|path| !path.is_empty())
+        && command.contains("rg")
+    {
+        return None;
+    }
+    // Codex runs the rewritten command without asking (it applies `updatedInput` only with
+    // an explicit allow): only one bare search, which `ctx compact --run` starts from PATH
+    // itself, no shell list whose other commands would go through aliases or functions.
+    if harness == "codex" {
+        let (_, directory, rest) = split_cd_prefix(command)?;
+        if directory.is_some() || split_list(rest)?.len() != 1 {
+            return None;
+        }
+    }
     let rewritten = rewrite_command(command, &cwd)?;
     let mut updated = tool_input.clone();
     updated.insert("command".to_owned(), Value::String(rewritten));
@@ -673,6 +691,8 @@ mod tests {
                 "grep -F \"\\$HOME\" a.rs",
                 "ctx compact --run -- grep -H -F '$HOME' a.rs",
             ),
+            // zsh expands a bare leading `=` to a program path.
+            ("rg -n x '=ls'", "ctx compact --run -- rg -H -n x '=ls'"),
             (
                 "rg -n \"it's\" a.rs",
                 "ctx compact --run -- rg -H -n 'it'\\''s' a.rs",
@@ -689,6 +709,29 @@ mod tests {
             rewrite_command("cd src && rg -n foo", cwd).unwrap(),
             "cd src && ctx compact --run -- rg -H -n foo"
         );
+    }
+
+    #[test]
+    fn codex_gets_only_a_lone_search_since_it_runs_it_without_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let payload = |command: &str| json!({"tool_name": "Bash", "cwd": dir.path(), "tool_input": {"command": command}});
+        for command in [
+            "sed -n '1,2p' a.rs; rg foo",
+            "cd src && rg foo",
+            "rg a && rg b",
+        ] {
+            assert!(
+                hook_response(&payload(command), "codex").is_none(),
+                "{command}"
+            );
+            assert!(
+                hook_response(&payload(command), "claude").is_some(),
+                "{command}"
+            );
+        }
+        let out = hook_response(&payload("rg foo"), "codex").unwrap();
+        assert_eq!(out["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     #[test]

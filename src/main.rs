@@ -946,12 +946,23 @@ async fn execute(cli: Cli) -> Result<()> {
             if run {
                 // The search keeps the caller's stdin and stderr; only its output is compacted.
                 let (program, arguments) = search.split_first().context("--run needs a search")?;
-                let output = std::process::Command::new(program)
+                let output = match std::process::Command::new(program)
                     .args(arguments)
                     .stdin(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit())
                     .output()
-                    .with_context(|| format!("cannot run {program}"))?;
+                {
+                    Ok(output) => output,
+                    // As the shell reports it: 127 when not found, 126 when not runnable.
+                    Err(error) => {
+                        let (code, what) = match error.kind() {
+                            io::ErrorKind::NotFound => (127, "command not found"),
+                            _ => (126, "cannot execute"),
+                        };
+                        eprintln!("ctx: {program}: {what}");
+                        std::process::exit(code);
+                    }
+                };
                 input = String::from_utf8_lossy(&output.stdout).into_owned();
                 // A search killed by a signal reports 128 + signal, as the shell would.
                 status = Some(

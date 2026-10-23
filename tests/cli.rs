@@ -826,3 +826,44 @@ fn compact_run_reports_a_signal_as_the_shell_does() {
         .unwrap();
     assert_eq!(killed.status.code(), Some(143));
 }
+
+#[test]
+fn compact_run_reports_a_missing_or_unrunnable_search_as_the_shell_does() {
+    let temporary = tempfile::tempdir().unwrap();
+    let missing = Command::cargo_bin("ctx")
+        .unwrap()
+        .args(["compact", "--run", "--", "no-such-search-tool-xyz"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(127));
+    let plain = temporary.path().join("not-executable");
+    fs::write(&plain, "x").unwrap();
+    let unrunnable = Command::cargo_bin("ctx")
+        .unwrap()
+        .args(["compact", "--run", "--"])
+        .arg(&plain)
+        .output()
+        .unwrap();
+    assert_eq!(unrunnable.status.code(), Some(126));
+}
+
+#[test]
+fn hook_rewrite_leaves_rg_alone_when_an_rg_config_file_is_set() {
+    let payload = r#"{"tool_name":"Bash","cwd":"/","tool_input":{"command":"rg foo"}}"#;
+    let configured = Command::cargo_bin("ctx")
+        .unwrap()
+        .env("RIPGREP_CONFIG_PATH", "/tmp/some-rgrc")
+        .args(["hook", "rewrite", "--harness", "codex"])
+        .write_stdin(payload)
+        .output()
+        .unwrap();
+    assert!(configured.stdout.is_empty());
+    let plain = Command::cargo_bin("ctx")
+        .unwrap()
+        .env_remove("RIPGREP_CONFIG_PATH")
+        .args(["hook", "rewrite", "--harness", "codex"])
+        .write_stdin(payload)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&plain.stdout).contains("ctx compact --run -- rg -H foo"));
+}
