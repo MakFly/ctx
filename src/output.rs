@@ -19,29 +19,15 @@ pub fn render_envelope_text(envelope: &Envelope, line_filter: Option<&Regex>) ->
 
         for hit in hits {
             let mut hit_lines = Vec::new();
-            let mut printed_range = None;
 
             if !hit.snippet.is_empty() && (is_content_kind(&hit.kind) || hit.kind == "call") {
-                let printed = hit
-                    .snippet
-                    .lines()
-                    .enumerate()
-                    .filter_map(|(index, line)| {
-                        if line_filter.is_some_and(|matcher| !matcher.is_match(line)) {
-                            return None;
-                        }
-                        let number = hit.start + index;
-                        hit_lines.push(format!("{number}:{}", line.trim_end()));
-                        Some(number)
-                    })
-                    .collect::<Vec<_>>();
-                if let (Some(first), Some(last)) = (printed.first(), printed.last()) {
-                    printed_range = Some((*first, *last));
+                let keep = matched_lines(&hit.snippet, line_filter);
+                for (index, line) in hit.snippet.lines().enumerate() {
+                    if keep.as_ref().is_none_or(|keep| keep.contains(&index)) {
+                        hit_lines.push(format!("{}:{}", hit.start + index, line.trim_end()));
+                    }
                 }
-            } else if hit.snippet.is_empty() {
-                hit_lines.push(format!("{} {} {}", hit.start, hit.kind, hit.why));
-                printed_range = Some((hit.start, hit.start));
-            } else if hit.symbol.is_some() && !is_content_kind(&hit.kind) {
+            } else if hit.symbol.is_some() && !hit.snippet.is_empty() {
                 let sig = hit.sig.split_whitespace().collect::<Vec<_>>().join(" ");
                 hit_lines.push(format!(
                     "{}-{} {} {}: {}",
@@ -51,10 +37,8 @@ pub fn render_envelope_text(envelope: &Envelope, line_filter: Option<&Regex>) ->
                     hit.symbol.as_deref().unwrap_or_default(),
                     sig
                 ));
-                printed_range = Some((hit.start, hit.end));
             } else {
                 hit_lines.push(format!("{} {} {}", hit.start, hit.kind, hit.why));
-                printed_range = Some((hit.start, hit.start));
             }
 
             if hit.snippet_truncated {
@@ -63,10 +47,6 @@ pub fn render_envelope_text(envelope: &Envelope, line_filter: Option<&Regex>) ->
                     "{number}: ... (truncated, read lines {}-{})",
                     hit.start, hit.end
                 ));
-                printed_range = Some(match printed_range {
-                    Some((start, end)) => (start, end.max(number)),
-                    None => (number, number),
-                });
             }
 
             lines.extend(hit_lines);
@@ -103,6 +83,35 @@ pub fn render_json<T: Serialize>(value: &T, pretty: bool) -> anyhow::Result<Stri
 
 fn is_content_kind(kind: &str) -> bool {
     matches!(kind, "text" | "test" | "doc" | "config")
+}
+
+/// Indexes of the snippet lines a match touches, matching the whole snippet so a
+/// match spanning several lines keeps all of them. None prints every line: no
+/// filter, or a filter that matches nothing in the snippet (the hit's evidence
+/// is then shown whole rather than dropped).
+fn matched_lines(
+    snippet: &str,
+    filter: Option<&Regex>,
+) -> Option<std::collections::BTreeSet<usize>> {
+    let filter = filter?;
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(snippet.match_indices('\n').map(|(index, _)| index + 1))
+        .collect();
+    let line_of = |offset: usize| {
+        starts
+            .partition_point(|&start| start <= offset)
+            .saturating_sub(1)
+    };
+    let mut keep = std::collections::BTreeSet::new();
+    for found in filter.find_iter(snippet) {
+        let last = if found.end() > found.start() {
+            found.end() - 1
+        } else {
+            found.start()
+        };
+        keep.extend(line_of(found.start())..=line_of(last));
+    }
+    (!keep.is_empty()).then_some(keep)
 }
 
 #[cfg(test)]
@@ -222,5 +231,24 @@ mod tests {
             render_json(&value, true).unwrap(),
             "{\n  \"key\": [\n    1,\n    2\n  ]\n}"
         );
+    }
+
+    #[test]
+    fn a_match_spanning_lines_keeps_every_line_it_touches() {
+        let matcher = regex::Regex::new("(?s)foo.*bar").unwrap();
+        let output = render_envelope_text(
+            &envelope(vec![hit(
+                "a.rs",
+                10,
+                13,
+                "text",
+                "before\nfoo(\n  x)\nbar;\nafter",
+            )]),
+            Some(&matcher),
+        );
+        assert!(output.contains("11:foo("), "{output}");
+        assert!(output.contains("12:  x)"), "{output}");
+        assert!(output.contains("13:bar;"), "{output}");
+        assert!(!output.contains("10:before"), "{output}");
     }
 }

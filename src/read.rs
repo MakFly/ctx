@@ -133,7 +133,7 @@ pub fn read_file(path: &Path, options: &ReadOptions) -> Result<ReadOutput> {
                 options.budget_tokens
             ));
         }
-        fill_outline(&mut output, &source, &lines, lang)?;
+        fill_outline(&mut output, &source, &lines, lang, options.budget_tokens)?;
     } else if !lines.is_empty() {
         output.blocks.push(ReadBlock {
             start: 1,
@@ -151,9 +151,20 @@ fn fill_outline(
     source: &str,
     lines: &[&str],
     lang: Option<&str>,
+    budget_tokens: usize,
 ) -> Result<()> {
+    let budget = budget_tokens.max(1);
     let Some(lang) = lang else {
-        let shown = lines.len().min(FALLBACK_OUTLINE_LINES);
+        // The first lines, as many as fit the budget (at most the fallback count).
+        let mut used = 0;
+        let shown = lines
+            .iter()
+            .take(FALLBACK_OUTLINE_LINES)
+            .take_while(|line| {
+                used += estimate_tokens(line);
+                used <= budget
+            })
+            .count();
         if shown > 0 {
             output.blocks.push(ReadBlock {
                 start: 1,
@@ -190,7 +201,16 @@ fn fill_outline(
                 .iter()
                 .any(|&(start, end)| start < symbol.start && symbol.end <= end)
     });
+    // One outline line per definition, as many as fit the budget.
+    let (mut used, mut omitted, mut first_omitted) = (0usize, 0usize, None);
     for symbol in symbols {
+        let cost = estimate_tokens(&symbol.sig) + 3;
+        if used + cost > budget {
+            omitted += 1;
+            first_omitted.get_or_insert(symbol.start);
+            continue;
+        }
+        used += cost;
         let start = symbol.start.clamp(1, lines.len().max(1));
         let end = symbol.end.max(start);
         if start <= lines.len() {
@@ -217,6 +237,15 @@ fn fill_outline(
     }
     if let Some(first) = gap_start {
         output.elided.push((first, lines.len()));
+    }
+    if let Some(line) = first_omitted {
+        let message = format!(
+            "outline over the {budget}-token budget: {omitted} more definitions from line {line} not shown; use --lines A:B or a larger --budget-tokens"
+        );
+        output.note = Some(match output.note.take() {
+            Some(previous) => format!("{previous}; {message}"),
+            None => message,
+        });
     }
     Ok(())
 }
@@ -534,6 +563,45 @@ mod tests {
         assert!(
             render_read_text(&output, false).contains(&format!("... {}-121 elided", block.end + 1))
         );
+    }
+
+    #[test]
+    fn outline_stays_within_the_budget_and_says_what_it_left_out() {
+        let source: String = (0..400)
+            .map(|i| format!("def f{i}(a, b, c):\n    return a\n"))
+            .collect();
+        let (_dir, path) = write("many.py", source.as_bytes());
+        let output = read_file(
+            &path,
+            &ReadOptions {
+                outline: true,
+                budget_tokens: 100,
+                ..options()
+            },
+        )
+        .unwrap();
+        let text = render_read_text(&output, false);
+        assert!(estimate_tokens(&text) <= 200, "{text}");
+        assert!(
+            output
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("more definitions"),
+            "{text}"
+        );
+        let wide = "x".repeat(4000) + "\n";
+        let (_dir2, path2) = write("wide.txt", wide.repeat(50).as_bytes());
+        let fallback = read_file(
+            &path2,
+            &ReadOptions {
+                outline: true,
+                budget_tokens: 2000,
+                ..options()
+            },
+        )
+        .unwrap();
+        assert!(estimate_tokens(&render_read_text(&fallback, false)) <= 2200);
     }
 
     #[test]

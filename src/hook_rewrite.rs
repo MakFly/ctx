@@ -117,7 +117,9 @@ fn rewrite_search(arguments: &[String], cwd: &Path, tool: SearchTool) -> Option<
         Some(path) => cwd.join(path),
         None => cwd.to_path_buf(),
     };
-    if !has_index(&target) {
+    // `ctx search --path` filters by substring, so only a search over exactly
+    // the indexed root keeps the original scope; anything narrower runs as is.
+    if !searches_the_index_root(&target) {
         return None;
     }
     let mut command = format!(
@@ -127,9 +129,6 @@ fn rewrite_search(arguments: &[String], cwd: &Path, tool: SearchTool) -> Option<
     );
     if ignore_case {
         command.push_str(" --ignore-case");
-    }
-    if let Some(path) = path.filter(|path| !matches!(*path, "." | "./")) {
-        command.push_str(&format!(" --path {}", quote(path)));
     }
     command.push_str(&format!(
         " --limit {SEARCH_LIMIT} --budget-tokens {SEARCH_BUDGET_TOKENS}"
@@ -182,6 +181,27 @@ fn has_index(target: &Path) -> bool {
     })
 }
 
+fn searches_the_index_root(target: &Path) -> bool {
+    // An index elsewhere (CTX_DIR) has a root this hook cannot check.
+    if std::env::var_os("CTX_DIR").is_some() || !target.is_dir() {
+        return false;
+    }
+    let Ok(ctx) = crate::config::find_ctx(target) else {
+        return false;
+    };
+    if !ctx.join("index.sqlite").is_file() {
+        return false;
+    }
+    match (
+        ctx.parent()
+            .and_then(|root| std::fs::canonicalize(root).ok()),
+        std::fs::canonicalize(target).ok(),
+    ) {
+        (Some(root), Some(target)) => root == target,
+        _ => false,
+    }
+}
+
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -217,6 +237,10 @@ fn tokenize(command: &str) -> Option<Vec<String>> {
             return Some(tokens);
         }
         let (word, end) = scan_word(command, position)?;
+        // Every word must consume input; anything else is a form this hook does not model.
+        if end <= position {
+            return None;
+        }
         tokens.push(word);
         position = end;
     }
@@ -237,8 +261,12 @@ fn scan_word(text: &str, start: usize) -> Option<(String, usize)> {
     let mut word = String::new();
     let mut at_start = true;
     while let Some(&(index, character)) = chars.peek() {
-        if character != '\n' && character.is_whitespace() {
+        if BLANKS.contains(&character) {
             return Some((word, index));
+        }
+        // Any other whitespace (CR, Unicode spaces) is not modelled: decline.
+        if character.is_whitespace() && character != '\n' {
+            return None;
         }
         chars.next();
         match character {
@@ -303,12 +331,12 @@ mod tests {
             "ctx search 'foo' --mode regex --limit 200 --budget-tokens 4000"
         );
         assert_eq!(
-            rewrite_command("rg -i -F foo src", cwd).unwrap(),
-            "ctx search 'foo' --mode literal --ignore-case --path 'src' --limit 200 --budget-tokens 4000"
+            rewrite_command("rg -i -F foo .", cwd).unwrap(),
+            "ctx search 'foo' --mode literal --ignore-case --limit 200 --budget-tokens 4000"
         );
         assert_eq!(
-            rewrite_command("rg -ni 'fo o' src", cwd).unwrap(),
-            "ctx search 'fo o' --mode regex --ignore-case --path 'src' --limit 200 --budget-tokens 4000"
+            rewrite_command("rg -ni 'fo o'", cwd).unwrap(),
+            "ctx search 'fo o' --mode regex --ignore-case --limit 200 --budget-tokens 4000"
         );
         assert_eq!(
             rewrite_command("rg -Fn \"a.b\"", cwd).unwrap(),
@@ -321,16 +349,16 @@ mod tests {
         let dir = indexed_dir();
         let cwd = dir.path();
         assert_eq!(
-            rewrite_command("grep -rn foo src", cwd).unwrap(),
-            "ctx search 'foo' --mode literal --path 'src' --limit 200 --budget-tokens 4000"
+            rewrite_command("grep -rn foo .", cwd).unwrap(),
+            "ctx search 'foo' --mode literal --limit 200 --budget-tokens 4000"
         );
         assert_eq!(
             rewrite_command("grep -Rni foo", cwd).unwrap(),
             "ctx search 'foo' --mode literal --ignore-case --limit 200 --budget-tokens 4000"
         );
         assert_eq!(
-            rewrite_command("grep -rnF 'a.b' src", cwd).unwrap(),
-            "ctx search 'a.b' --mode literal --path 'src' --limit 200 --budget-tokens 4000"
+            rewrite_command("grep -rnF 'a.b'", cwd).unwrap(),
+            "ctx search 'a.b' --mode literal --limit 200 --budget-tokens 4000"
         );
         assert_eq!(
             rewrite_command("grep -r -n foo", cwd).unwrap(),
@@ -371,9 +399,14 @@ mod tests {
         let dir = indexed_dir();
         let cwd = dir.path();
         fs::write(cwd.join("src/long.rs"), lines(250)).unwrap();
+        // A search narrower than the indexed root keeps its own scope: no rewrite.
+        assert!(rewrite_command("cd src && rg -n foo", cwd).is_none());
+        assert!(rewrite_command("rg -n foo src", cwd).is_none());
+        assert!(rewrite_command("grep -rn foo src", cwd).is_none());
+        assert!(rewrite_command("rg -n foo", &cwd.join("src")).is_none());
         assert_eq!(
-            rewrite_command("cd src && rg -n foo", cwd).unwrap(),
-            "cd src && ctx search 'foo' --mode regex --limit 200 --budget-tokens 4000"
+            rewrite_command("cd src/.. && rg -n foo", cwd).unwrap(),
+            "cd src/.. && ctx search 'foo' --mode regex --limit 200 --budget-tokens 4000"
         );
         assert_eq!(
             rewrite_command("cd 'src'   &&   cat long.rs", cwd).unwrap(),
@@ -432,6 +465,9 @@ mod tests {
             "",
             "   ",
             "rg 'unterminated",
+            "rg foo\r",
+            "rg\u{00a0}foo",
+            "rg foo\u{2003}.",
         ] {
             assert!(rewrite_command(command, cwd).is_none(), "{command:?}");
         }

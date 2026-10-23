@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use fs2::FileExt;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -574,9 +574,11 @@ pub fn import_bench(root: &Path, file: &Path, arm: &str, base: &str) -> Result<(
         let usable = !row.get("warm").and_then(Value::as_bool).unwrap_or(false)
             && row.get("ok").and_then(Value::as_bool).unwrap_or(true);
         if row_arm == arm {
-            arm_rows.push((key, usable.then(|| bench_usage(&row))));
+            arm_rows.push((key, usable.then(|| bench_usage(&row)).flatten()));
         } else if row_arm == base && usable {
-            base_rows.insert(key, bench_usage(&row));
+            if let Some(usage) = bench_usage(&row) {
+                base_rows.insert(key, usage);
+            }
         }
     }
     let (project_id, project_name) = project_id(&root)?;
@@ -590,11 +592,24 @@ pub fn import_bench(root: &Path, file: &Path, arm: &str, base: &str) -> Result<(
             skipped += 1;
             continue;
         };
-        let identity = format!("{}\0{harness}\0{query}\0{rep}\0{arm}", canonical.display());
+        // The same file, rows, arms and project always give the same event: a
+        // re-import is ignored, and a changed measurement under the same identity is refused.
+        let identity = format!(
+            "{}\0{project_id}\0{harness}\0{query}\0{rep}\0{arm}\0{base}",
+            canonical.display()
+        );
+        let event_id = format!("{:x}", Sha256::digest(identity.as_bytes()));
+        if let Some(stored) = stored_bench_pair(&root, &event_id)?
+            && stored != (usage.0, usage.1, baseline.0, baseline.1)
+        {
+            bail!(
+                "conflicting measurement for {harness}/{query}#{rep}: already imported with different tokens"
+            );
+        }
         store_event(
             &root,
             &MetricEvent {
-                event_id: format!("{:x}", Sha256::digest(identity.as_bytes())),
+                event_id,
                 created_at,
                 project_id: project_id.clone(),
                 project_name: project_name.clone(),
@@ -623,24 +638,49 @@ pub fn import_bench(root: &Path, file: &Path, arm: &str, base: &str) -> Result<(
     Ok((imported, skipped))
 }
 
-/// (total input, output) of one benchmark row.
-fn bench_usage(row: &Value) -> (u64, u64) {
+/// (total input, output) of one benchmark row, or None when a token field is
+/// missing, not a non-negative integer, or the total does not fit SQLite's integer.
+fn bench_usage(row: &Value) -> Option<(u64, u64)> {
+    const MAX: u64 = i64::MAX as u64;
     let number = |key: &str| {
-        row.get(key)
-            .and_then(|value| {
-                value.as_u64().or_else(|| {
-                    value
-                        .as_f64()
-                        .filter(|v| *v >= 0.0)
-                        .map(|v| v.round() as u64)
-                })
-            })
-            .unwrap_or(0)
+        let value = row.get(key)?;
+        let number = value.as_u64().or_else(|| {
+            value
+                .as_f64()
+                .filter(|v| v.is_finite() && *v >= 0.0 && v.fract() == 0.0 && *v <= 9.0e15)
+                .map(|v| v as u64)
+        })?;
+        (number <= MAX).then_some(number)
     };
-    (
-        number("uncached") + number("cacheWrite") + number("cacheRead"),
-        number("output"),
-    )
+    let input = number("uncached")?
+        .checked_add(number("cacheWrite")?)?
+        .checked_add(number("cacheRead")?)?;
+    (input <= MAX).then_some((input, number("output")?))
+}
+
+/// The (input, output, baseline input, baseline output) of an already imported pair.
+fn stored_bench_pair(root: &Path, event_id: &str) -> Result<Option<(u64, u64, u64, u64)>> {
+    let path = ctx_dir(root).join("metrics.sqlite");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let connection = open_database(&path)?;
+    let row = connection
+        .query_row(
+            "SELECT input_tokens, output_tokens, baseline_input_tokens, baseline_output_tokens
+               FROM events WHERE event_id = ?1",
+            params![event_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?.unwrap_or(0) as u64,
+                    row.get::<_, Option<i64>>(1)?.unwrap_or(0) as u64,
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0) as u64,
+                    row.get::<_, Option<i64>>(3)?.unwrap_or(0) as u64,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(row)
 }
 
 fn store_event(root: &Path, event: &MetricEvent) -> Result<()> {
@@ -918,14 +958,27 @@ fn build_report(
 }
 
 fn accumulate(state: &mut AggregateState, event: &MetricEvent, pricing: &[Pricing]) {
+    // Totals saturate instead of overflowing on a huge or corrupt event.
     state.events += 1;
-    state.tool_calls += event.tool_calls;
-    state.ctx_tokens += event.ctx_tokens.unwrap_or(0);
-    state.input_tokens += event.input_tokens.unwrap_or(0);
-    state.cached_input_tokens += event.cached_input_tokens.unwrap_or(0);
-    state.output_tokens += event.output_tokens.unwrap_or(0);
-    state.reasoning_tokens += event.reasoning_tokens.unwrap_or(0);
-    state.duration_ms += event.duration_ms.unwrap_or(0);
+    state.tool_calls = state.tool_calls.saturating_add(event.tool_calls);
+    state.ctx_tokens = state
+        .ctx_tokens
+        .saturating_add(event.ctx_tokens.unwrap_or(0));
+    state.input_tokens = state
+        .input_tokens
+        .saturating_add(event.input_tokens.unwrap_or(0));
+    state.cached_input_tokens = state
+        .cached_input_tokens
+        .saturating_add(event.cached_input_tokens.unwrap_or(0));
+    state.output_tokens = state
+        .output_tokens
+        .saturating_add(event.output_tokens.unwrap_or(0));
+    state.reasoning_tokens = state
+        .reasoning_tokens
+        .saturating_add(event.reasoning_tokens.unwrap_or(0));
+    state.duration_ms = state
+        .duration_ms
+        .saturating_add(event.duration_ms.unwrap_or(0));
     state.cache_hits += event.cache_hit as u64;
     if matches!(
         event.kind.as_str(),
@@ -941,14 +994,15 @@ fn accumulate(state: &mut AggregateState, event: &MetricEvent, pricing: &[Pricin
     }
     if event.kind != "baseline" {
         if let Some(value) = event.baseline_input_tokens {
-            state.baseline_input_tokens += value;
+            state.baseline_input_tokens = state.baseline_input_tokens.saturating_add(value);
         }
         if let Some(value) = event.saved_input_tokens {
-            state.saved_input_tokens += value;
+            state.saved_input_tokens = state.saved_input_tokens.saturating_add(value);
             state.savings_events += 1;
             if event.confidence == "estimated" {
                 state.estimated_savings_events += 1;
-                state.estimated_context_avoided_tokens += value;
+                state.estimated_context_avoided_tokens =
+                    state.estimated_context_avoided_tokens.saturating_add(value);
             } else {
                 state.exact_savings_events += 1;
                 let baseline = event.baseline_input_tokens;
@@ -958,10 +1012,14 @@ fn accumulate(state: &mut AggregateState, event: &MetricEvent, pricing: &[Pricin
                     }
                     _ => to_signed(value),
                 };
-                state.measured_baseline_input_tokens += baseline.unwrap_or(0);
-                state.measured_input_tokens += to_signed(baseline.unwrap_or(0))
-                    .saturating_sub(saved)
-                    .max(0) as u64;
+                state.measured_baseline_input_tokens = state
+                    .measured_baseline_input_tokens
+                    .saturating_add(baseline.unwrap_or(0));
+                state.measured_input_tokens = state.measured_input_tokens.saturating_add(
+                    to_signed(baseline.unwrap_or(0))
+                        .saturating_sub(saved)
+                        .max(0) as u64,
+                );
                 state.measured_saved_input_tokens =
                     state.measured_saved_input_tokens.saturating_add(saved);
             }
@@ -1433,5 +1491,77 @@ mod tests {
         assert_eq!(events[0].baseline_input_tokens, Some(1_000));
         assert_eq!(events[0].baseline_output_tokens, Some(5));
         assert_eq!(events[0].query_hash, Some(hash_query("one")));
+    }
+
+    #[test]
+    fn import_bench_rejects_malformed_rows_and_conflicting_reimports() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let directory = ctx_dir(&repo_root(root).unwrap());
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("config.toml"), "[metrics]\nglobal = false\n").unwrap();
+        let results = root.join("results.jsonl");
+        let base = r#"{"h":"a","arm":"base","q":"one","rep":1,"ok":true,"uncached":100,"cacheWrite":0,"cacheRead":0,"output":5}"#;
+        let malformed = [
+            r#"{"h":"a","arm":"ctx","q":"one","rep":1,"ok":true,"uncached":-1,"cacheWrite":0,"cacheRead":0,"output":5}"#,
+            r#"{"h":"a","arm":"ctx","q":"one","rep":1,"ok":true,"uncached":1.5,"cacheWrite":0,"cacheRead":0,"output":5}"#,
+            r#"{"h":"a","arm":"ctx","q":"one","rep":1,"ok":true,"cacheWrite":0,"cacheRead":0,"output":5}"#,
+            r#"{"h":"a","arm":"ctx","q":"one","rep":1,"ok":true,"uncached":9223372036854775807,"cacheWrite":1,"cacheRead":0,"output":5}"#,
+        ];
+        for row in malformed {
+            fs::write(&results, format!("{base}\n{row}")).unwrap();
+            assert_eq!(
+                import_bench(root, &results, "ctx", "base").unwrap(),
+                (0, 1),
+                "{row}"
+            );
+        }
+        let good = r#"{"h":"a","arm":"ctx","q":"one","rep":1,"ok":true,"uncached":120,"cacheWrite":0,"cacheRead":0,"output":5}"#;
+        fs::write(&results, format!("{base}\n{good}")).unwrap();
+        assert_eq!(import_bench(root, &results, "ctx", "base").unwrap(), (1, 0));
+        let changed = good.replace("120", "130");
+        fs::write(&results, format!("{base}\n{changed}")).unwrap();
+        assert!(import_bench(root, &results, "ctx", "base").is_err());
+        // Another baseline arm is another measurement, not a duplicate.
+        let other = base.replace("\"base\"", "\"plain\"");
+        fs::write(&results, format!("{other}\n{good}")).unwrap();
+        assert_eq!(
+            import_bench(root, &results, "ctx", "plain").unwrap(),
+            (1, 0)
+        );
+    }
+
+    #[test]
+    fn totals_saturate_instead_of_overflowing() {
+        let mut state = AggregateState::default();
+        let mut event = MetricEvent {
+            event_id: "e".to_owned(),
+            created_at: 0,
+            project_id: "p".to_owned(),
+            project_name: "p".to_owned(),
+            kind: "bench_pair".to_owned(),
+            harness: "h".to_owned(),
+            model: String::new(),
+            confidence: "exact".to_owned(),
+            query_hash: None,
+            input_tokens: Some(u64::MAX),
+            cached_input_tokens: None,
+            output_tokens: Some(u64::MAX),
+            reasoning_tokens: None,
+            ctx_tokens: None,
+            baseline_input_tokens: Some(u64::MAX),
+            baseline_output_tokens: None,
+            saved_input_tokens: Some(u64::MAX),
+            saved_output_tokens: None,
+            duration_ms: None,
+            cache_hit: false,
+            tool_calls: 0,
+            baseline_paths: None,
+        };
+        accumulate(&mut state, &event, &[]);
+        event.event_id = "f".to_owned();
+        accumulate(&mut state, &event, &[]);
+        assert_eq!(state.input_tokens, u64::MAX);
+        assert_eq!(state.baseline_input_tokens, u64::MAX);
     }
 }
