@@ -46,7 +46,7 @@ pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {
                 if split_pipeline(segment)?.len() != 1 || !is_plain_read(&words) {
                     return None;
                 }
-                out.push_str(segment.trim_end());
+                out.push_str(segment.trim_end_matches(BLANKS));
             }
         }
         out.push_str(separator);
@@ -210,7 +210,7 @@ fn split_list(command: &str) -> Option<Vec<(String, String)>> {
                 let next = command[separator_end..]
                     .find(|c: char| c != ' ')
                     .map_or(command.len(), |offset| separator_end + offset);
-                let segment = command[start..index].trim();
+                let segment = command[start..index].trim_matches(BLANKS);
                 if segment.is_empty() {
                     return None;
                 }
@@ -236,7 +236,7 @@ fn split_list(command: &str) -> Option<Vec<(String, String)>> {
     if quote.is_some() {
         return None;
     }
-    let last = command[start..].trim();
+    let last = command[start..].trim_matches(BLANKS);
     if !last.is_empty() {
         segments.push((last.to_owned(), String::new()));
     }
@@ -488,7 +488,7 @@ const BLANKS: [char; 2] = [' ', '\t'];
 
 /// Splits an optional `cd <dir> && ` prefix (kept verbatim) from the command proper.
 fn split_cd_prefix(command: &str) -> Option<(&str, Option<String>, &str)> {
-    let Some(after_cd) = command.trim_start().strip_prefix("cd") else {
+    let Some(after_cd) = command.trim_start_matches(BLANKS).strip_prefix("cd") else {
         return Some(("", None, command));
     };
     if !after_cd.starts_with(BLANKS) {
@@ -579,7 +579,8 @@ fn scan_word(text: &str, start: usize) -> Option<(String, usize)> {
             | '!' => return None,
             // Bash expands an unquoted `~` after `=` too (`--glob=~/x`): decline it anywhere.
             '~' => return None,
-            '#' if at_start => return None,
+            // zsh expands an unquoted leading `=` to a program path (`=ls`).
+            '#' | '=' if at_start => return None,
             other => word.push(other),
         }
         at_start = false;
@@ -748,6 +749,9 @@ mod tests {
             "git grep --open-files-in-pag=printf foo",
             "rg foo ~/x",
             "rg --glob=~/x foo",
+            "rg =ls",
+            "rg foo\u{a0}",
+            "rg\u{a0}foo",
             "rg -e",
         ] {
             assert!(rewrite_command(command, cwd).is_none(), "{command:?}");
