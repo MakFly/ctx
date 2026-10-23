@@ -1777,12 +1777,15 @@ fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> R
         .by_ref()
         .take(RUN_OUTPUT_BYTES)
         .read_to_end(&mut kept)?;
-    io::copy(&mut stdout, &mut io::sink())?;
+    let dropped = io::copy(&mut stdout, &mut io::sink())?;
     let exit = child.wait()?;
     print!(
         "{}",
         ctx_code::compact::compact(&String::from_utf8_lossy(&kept), options)
     );
+    if dropped > 0 {
+        println!("... {dropped} more bytes of search output not read; narrow the search");
+    }
     Ok(step_status(exit))
 }
 
