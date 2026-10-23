@@ -1043,3 +1043,45 @@ fn compact_run_passes_non_utf8_content_through_byte_for_byte() {
     // The NUL ctx added after the path reads as grep's own `:`.
     assert_eq!(output.stdout, b"./caf\xe9.txt:1:needle\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn compact_run_keeps_a_nul_inside_non_utf8_matched_text() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a.txt"), b"needle\xff\0payload\n").unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-a", "-r", "needle", "."])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    // Only the NUL ctx added after the path is read back as `:`.
+    assert_eq!(output.stdout, b"./a.txt:1:needle\xff\0payload\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_run_passes_all_non_utf8_output_past_the_buffer_cap() {
+    let temporary = tempfile::tempdir().unwrap();
+    let lines = 1_200_000;
+    fs::write(
+        temporary.path().join("a.txt"),
+        b"needle\xff\n".repeat(lines),
+    )
+    .unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-a", "-r", "needle", "."])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.len() > 16 * 1024 * 1024);
+    assert_eq!(
+        output.stdout.iter().filter(|byte| **byte == b'\n').count(),
+        lines
+    );
+    let last = [b"./a.txt:", lines.to_string().as_bytes(), b":needle\xff\n"].concat();
+    assert!(output.stdout.ends_with(&last));
+}

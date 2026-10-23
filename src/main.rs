@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -1799,13 +1799,12 @@ fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> R
         .by_ref()
         .take(RUN_OUTPUT_BYTES)
         .read_to_end(&mut kept)?;
-    let dropped = io::copy(&mut stdout, &mut io::sink())?;
-    let exit = child.wait()?;
-    // Text that is not UTF-8 (a name or a line in another encoding) is passed through
-    // byte for byte rather than decoded into something that does not exist. A buffer cut
-    // inside a character at the cap keeps only its whole characters.
+    // Text that is not UTF-8 (a name or a line in another encoding) is not decoded into
+    // something that does not exist: the whole stream, kept bytes then the rest, goes
+    // out line by line as the search printed it without `--null`.
     let text = match String::from_utf8(kept) {
         Ok(text) => text,
+        // Only a character cut at the cap: keep the whole ones before it.
         Err(error) if error.utf8_error().error_len().is_none() => {
             let valid = error.utf8_error().valid_up_to();
             let mut bytes = error.into_bytes();
@@ -1813,10 +1812,19 @@ fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> R
             String::from_utf8(bytes).expect("cut at a character boundary")
         }
         Err(error) => {
-            io::stdout().write_all(&without_nul(error.as_bytes()))?;
-            return Ok(step_status(exit));
+            let mut lines = io::BufReader::new(io::Cursor::new(error.into_bytes()).chain(stdout));
+            let mut out = io::stdout().lock();
+            let mut line = Vec::new();
+            while lines.read_until(b'\n', &mut line)? > 0 {
+                out.write_all(&without_added_nul(&line))?;
+                line.clear();
+            }
+            drop(out);
+            return Ok(step_status(child.wait()?));
         }
     };
+    let dropped = io::copy(&mut stdout, &mut io::sink())?;
+    let exit = child.wait()?;
     print!("{}", ctx_code::compact::compact(&text, options));
     if dropped > 0 {
         println!("... {dropped} more bytes of search output not read; narrow the search");
@@ -1833,23 +1841,20 @@ fn run_read(words: &[String]) -> Result<i32> {
     }
 }
 
-/// `--null` output as the search prints it without `--null`: the NUL after a path is
-/// the `:` of a match line or the `-` of a context line, by what follows the number.
-fn without_nul(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte != 0 {
-            out.push(*byte);
-            continue;
-        }
-        let digits = bytes[index + 1..]
+/// One `--null` output line as the search prints it without `--null`: only the first
+/// NUL, the one after the path, becomes the `:` of a match line or the `-` of a context
+/// line (by what follows the number); a NUL in the matched text stays.
+fn without_added_nul(line: &[u8]) -> Vec<u8> {
+    let mut out = line.to_vec();
+    if let Some(at) = line.iter().position(|byte| *byte == 0) {
+        let digits = line[at + 1..]
             .iter()
             .take_while(|byte| byte.is_ascii_digit())
             .count();
-        out.push(match bytes.get(index + 1 + digits) {
+        out[at] = match line.get(at + 1 + digits) {
             Some(b'-') if digits > 0 => b'-',
             _ => b':',
-        });
+        };
     }
     out
 }
