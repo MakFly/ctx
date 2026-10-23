@@ -31,21 +31,30 @@ impl Default for CompactOptions {
 
 /// Largest single definition body shown in full, in tokens.
 const MAX_BODY_TOKENS: usize = 700;
+/// Lines shown before and after a match that is not a definition.
+const WINDOW_BEFORE: usize = 8;
+const WINDOW_AFTER: usize = 30;
 
 fn estimate_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4)
 }
 
+/// A file's lines and the symbols parsed from it.
+type Parsed = (Vec<String>, Vec<crate::model::Symbol>);
+
 /// The bodies of the definitions whose first lines the search matched (a search for
-/// a function usually precedes reading it), exact and numbered, within the budget.
+/// a function usually precedes reading it), then the lines around the other
+/// matches, exact and numbered, within the budget.
 fn expand_definitions(matches: &[(String, usize, String)], root: &Path, budget: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     let mut seen = std::collections::HashSet::new();
-    let mut parsed: std::collections::HashMap<
-        String,
-        Option<(Vec<String>, Vec<crate::model::Symbol>)>,
-    > = std::collections::HashMap::new();
+    // Line spans already printed, so a window never repeats a definition body.
+    let mut shown: Vec<(String, usize, usize)> = Vec::new();
+    let mut parsed: std::collections::HashMap<String, Option<Parsed>> =
+        std::collections::HashMap::new();
+    let mut sources: std::collections::HashMap<String, Option<Vec<String>>> =
+        std::collections::HashMap::new();
     for (path, line, text) in matches {
         let entry = parsed.entry(path.clone()).or_insert_with(|| {
             let full = root.join(path);
@@ -76,6 +85,7 @@ fn expand_definitions(matches: &[(String, usize, String)], root: &Path, budget: 
             continue;
         }
         let end = symbol.end.min(lines.len());
+        shown.push((path.clone(), symbol.start, end));
         let mut block = format!(
             "## {path} {}-{end} {} {}\n",
             symbol.start, symbol.kind, symbol.qualname
@@ -99,11 +109,49 @@ fn expand_definitions(matches: &[(String, usize, String)], root: &Path, budget: 
         used += cost;
         out.push_str(&block);
     }
-    if out.is_empty() {
+    let mut out = if out.is_empty() {
         out
     } else {
         format!("definitions found:\n{out}")
+    };
+    // Then the source around the other matches (a search is usually followed by
+    // reading just that neighbourhood), while the budget lasts.
+    let mut windows = String::new();
+    for (path, line, _) in matches {
+        if shown
+            .iter()
+            .any(|(p, from, to)| p == path && from <= line && line <= to)
+        {
+            continue;
+        }
+        let Some(lines) = sources.entry(path.clone()).or_insert_with(|| {
+            std::fs::read_to_string(root.join(path))
+                .ok()
+                .map(|text| text.lines().map(str::to_owned).collect())
+        }) else {
+            continue;
+        };
+        if *line == 0 || *line > lines.len() {
+            continue;
+        }
+        let from = line.saturating_sub(WINDOW_BEFORE).max(1);
+        let to = (line + WINDOW_AFTER).min(lines.len());
+        let mut block = format!("## {path} {from}-{to}\n");
+        for number in from..=to {
+            block.push_str(&format!("{number}\t{}\n", lines[number - 1]));
+        }
+        let cost = estimate_tokens(&block);
+        if used + cost > budget {
+            break;
+        }
+        used += cost;
+        shown.push((path.clone(), from, to));
+        windows.push_str(&block);
     }
+    if !windows.is_empty() {
+        out.push_str(&format!("around the matches:\n{windows}"));
+    }
+    out
 }
 
 /// One parsed `path:line:text` match line, or a `path-line-text` context line.
@@ -316,6 +364,33 @@ mod tests {
             },
         );
         assert!(!none.contains("definitions found"), "{none}");
+    }
+
+    #[test]
+    fn the_lines_around_other_matches_follow_once_within_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(dir.path().join("a.txt"), body).unwrap();
+        let options = CompactOptions {
+            expand_tokens: 500,
+            root: Some(dir.path().to_path_buf()),
+            ..CompactOptions::default()
+        };
+        // Line 20 falls inside the window of line 15, so it adds nothing.
+        let out = compact("a.txt:15:line 15\na.txt:20:line 20\n", options.clone());
+        assert!(
+            out.contains("around the matches:\n## a.txt 7-45\n7\tline 7\n"),
+            "{out}"
+        );
+        assert_eq!(out.matches("## a.txt").count(), 1, "{out}");
+        let tight = compact(
+            "a.txt:15:line 15\n",
+            CompactOptions {
+                expand_tokens: 20,
+                ..options
+            },
+        );
+        assert!(!tight.contains("around the matches"), "{tight}");
     }
 
     #[test]

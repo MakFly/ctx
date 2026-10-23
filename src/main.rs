@@ -187,7 +187,7 @@ enum Command {
         /// Characters of a match's text kept before it is shortened.
         #[arg(long, default_value_t = 240)]
         max_line_chars: usize,
-        /// Token budget for the bodies of matched definitions (0 disables it).
+        /// Token budget for matched definition bodies and the lines around other matches (0 disables it).
         #[arg(long, default_value_t = 1_500)]
         expand_tokens: usize,
     },
