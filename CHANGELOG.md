@@ -8,6 +8,10 @@
   files that resolve inside the repository root. Absolute paths, `..` segments
   and symlinks leaving the root are refused, and the expanded span obeys the
   requested token budget.
+- `ctx lsp fetch` now refuses a release asset without a published SHA-256
+  digest, an asset name that is not a plain file name, a download URL outside
+  the server's own GitHub releases, and assets above 256 MiB. Downloads stream
+  to disk and the Python wheel must be a `basedpyright-*.whl`.
 
 ## 0.3.0 - 2026-09-15
 

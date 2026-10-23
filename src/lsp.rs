@@ -979,10 +979,15 @@ fn select_asset(language: &str, assets: &[Value]) -> Result<Option<Value>> {
         _ => return Ok(None),
     };
     Ok(assets.iter().find_map(|asset| {
-        let name = asset["name"].as_str()?;
+        let name = asset_file_name(asset).ok()?;
         names
             .iter()
-            .any(|wanted| name == wanted || (wanted == ".whl" && name.ends_with(wanted)))
+            .any(|wanted| {
+                name == wanted
+                    || (wanted == ".whl"
+                        && name.starts_with("basedpyright-")
+                        && name.ends_with(wanted))
+            })
             .then(|| asset.clone())
     }))
 }
@@ -1012,9 +1017,12 @@ fn install_asset(
     asset: &Value,
     install_root: &Path,
 ) -> Result<Vec<String>> {
-    let name = asset["name"].as_str().context("nom d'asset absent")?;
+    let name = asset_file_name(asset)?;
+    let repository = server(language)
+        .with_context(|| format!("langage LSP inconnu: {language}"))?
+        .repository;
     let archive = install_root.join("downloads").join(name);
-    download(client, asset, &archive)?;
+    download(client, repository, asset, &archive)?;
     let bin = install_root.join("bin");
     fs::create_dir_all(&bin)?;
     match language {
@@ -1091,7 +1099,61 @@ fn install_asset(
     }
 }
 
-fn download(client: &Client, asset: &Value, destination: &Path) -> Result<()> {
+/// Largest release asset ctx downloads; current servers are well below it.
+const MAX_ASSET_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Returns the asset name when it is one plain file name, so it cannot
+/// address a path outside the downloads directory.
+fn asset_file_name(asset: &Value) -> Result<&str> {
+    let name = asset["name"].as_str().context("nom d'asset absent")?;
+    let plain = !name.starts_with('.')
+        && !name.contains(['/', '\\', '\0'])
+        && Path::new(name).file_name().and_then(|value| value.to_str()) == Some(name);
+    if !plain {
+        bail!("nom d'asset GitHub dangereux: {name}");
+    }
+    Ok(name)
+}
+
+/// GitHub's published SHA-256 for the asset. Downloads without one are refused.
+fn expected_sha256(asset: &Value) -> Result<String> {
+    match asset["digest"]
+        .as_str()
+        .and_then(|value| value.strip_prefix("sha256:"))
+    {
+        Some(hex) if hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+            Ok(hex.to_ascii_lowercase())
+        }
+        _ => bail!(
+            "asset GitHub sans SHA-256 publié, téléchargement refusé: {}",
+            asset["name"].as_str().unwrap_or("asset")
+        ),
+    }
+}
+
+/// The asset URL, accepted only from the server's own GitHub release downloads.
+fn asset_url<'a>(repository: &str, asset: &'a Value) -> Result<&'a str> {
+    let url = asset["browser_download_url"]
+        .as_str()
+        .context("URL d'asset absente")?;
+    if !url.starts_with(&format!(
+        "https://github.com/{repository}/releases/download/"
+    )) {
+        bail!("URL d'asset hors des releases de {repository}: {url}");
+    }
+    Ok(url)
+}
+
+fn download(client: &Client, repository: &str, asset: &Value, destination: &Path) -> Result<()> {
+    let name = asset_file_name(asset)?;
+    let expected = expected_sha256(asset)?;
+    let url = asset_url(repository, asset)?;
+    if asset["size"]
+        .as_u64()
+        .is_some_and(|size| size > MAX_ASSET_BYTES)
+    {
+        bail!("asset GitHub trop volumineux: {name}");
+    }
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1102,27 +1164,39 @@ fn download(client: &Client, asset: &Value, destination: &Path) -> Result<()> {
             .and_then(|value| value.to_str())
             .unwrap_or_default()
     ));
-    let url = asset["browser_download_url"]
-        .as_str()
-        .context("URL d'asset absente")?;
-    let bytes = client
+    let response = client
         .get(url)
         .header(USER_AGENT, "ctx-code")
         .send()?
-        .error_for_status()?
-        .bytes()?;
-    let actual = format!("{:x}", Sha256::digest(&bytes));
-    if let Some(expected) = asset["digest"]
-        .as_str()
-        .and_then(|value| value.strip_prefix("sha256:"))
-        && actual != expected
-    {
-        bail!(
-            "SHA-256 GitHub invalide pour {}",
-            asset["name"].as_str().unwrap_or("asset")
-        );
+        .error_for_status()?;
+    let written = (|| -> Result<()> {
+        let mut source = response.take(MAX_ASSET_BYTES + 1);
+        let mut output = File::create(&temporary)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; 64 * 1024];
+        let mut total = 0_u64;
+        loop {
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            if total > MAX_ASSET_BYTES {
+                bail!("asset GitHub trop volumineux: {name}");
+            }
+            hasher.update(&buffer[..read]);
+            output.write_all(&buffer[..read])?;
+        }
+        output.sync_all()?;
+        if format!("{:x}", hasher.finalize()) != expected {
+            bail!("SHA-256 GitHub invalide pour {name}");
+        }
+        Ok(())
+    })();
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
     }
-    fs::write(&temporary, &bytes)?;
     fs::rename(temporary, destination)?;
     Ok(())
 }
@@ -1242,7 +1316,60 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{reference_location, select_asset, server_request_response, sources, status};
+    use super::{
+        asset_file_name, asset_url, expected_sha256, reference_location, select_asset,
+        server_request_response, sources, status,
+    };
+
+    #[test]
+    fn asset_names_must_be_plain_file_names() {
+        for name in ["../evil.gz", "a/b.gz", "a\\b.gz", ".hidden", "..", ""] {
+            assert!(asset_file_name(&json!({"name": name})).is_err(), "{name}");
+        }
+        let plain = json!({"name": "rust-analyzer-x86_64-unknown-linux-gnu.gz"});
+        assert!(asset_file_name(&plain).is_ok());
+    }
+
+    #[test]
+    fn python_asset_selection_requires_a_basedpyright_wheel() {
+        let assets = [
+            json!({"name": "../../evil.whl"}),
+            json!({"name": "other-1.0-py3-none-any.whl"}),
+        ];
+        assert!(select_asset("python", &assets).unwrap().is_none());
+        let wheel = json!({"name": "basedpyright-1.2.3-py3-none-any.whl"});
+        let selected = select_asset("python", &[assets[0].clone(), wheel]).unwrap();
+        assert_eq!(
+            selected.unwrap()["name"],
+            "basedpyright-1.2.3-py3-none-any.whl"
+        );
+    }
+
+    #[test]
+    fn downloads_require_a_published_sha256_and_the_server_release_url() {
+        assert!(expected_sha256(&json!({"name": "a.gz"})).is_err());
+        assert!(expected_sha256(&json!({"digest": "sha256:abc"})).is_err());
+        assert!(expected_sha256(&json!({"digest": format!("md5:{}", "a".repeat(64))})).is_err());
+        let hex = "AB".repeat(32);
+        assert_eq!(
+            expected_sha256(&json!({"digest": format!("sha256:{hex}")})).unwrap(),
+            hex.to_ascii_lowercase()
+        );
+        let repository = "rust-lang/rust-analyzer";
+        let own = json!({"browser_download_url":
+            "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-20/ra.gz"});
+        assert!(asset_url(repository, &own).is_ok());
+        for url in [
+            "https://evil.example/rust-lang/rust-analyzer/releases/download/x/ra.gz",
+            "http://github.com/rust-lang/rust-analyzer/releases/download/x/ra.gz",
+            "https://github.com/someone/fork/releases/download/x/ra.gz",
+        ] {
+            assert!(
+                asset_url(repository, &json!({"browser_download_url": url})).is_err(),
+                "{url}"
+            );
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
