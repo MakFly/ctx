@@ -328,11 +328,6 @@ enum MetricsCommand {
         #[arg(long)]
         model: Option<String>,
     },
-    /// Rewrite a shell command into a bounded ctx equivalent (PreToolUse hook).
-    Rewrite {
-        #[arg(long)]
-        harness: String,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -381,6 +376,11 @@ enum HookCommand {
         harness: String,
         #[arg(long)]
         model: Option<String>,
+    },
+    /// Rewrite a shell command into a bounded ctx equivalent (PreToolUse hook).
+    Rewrite {
+        #[arg(long)]
+        harness: String,
     },
 }
 
