@@ -338,7 +338,7 @@ fn append_once(root: &Path, path: &Path, snippet: &str) -> Result<()> {
     write(root, path.to_path_buf(), &updated)
 }
 
-fn load_json(path: &Path) -> Result<Map<String, Value>> {
+pub(crate) fn load_json(path: &Path) -> Result<Map<String, Value>> {
     if !path.is_file() {
         return Ok(Map::new());
     }
@@ -575,6 +575,11 @@ fn read_existing(path: &Path) -> Result<String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(error) => Err(error).with_context(|| format!("lecture impossible: {}", path.display())),
     }
+}
+
+/// Atomic write of `contents` to `path`, refused outside `root`.
+pub(crate) fn write_text(root: &Path, path: &Path, contents: &str) -> Result<()> {
+    write(root, path.to_path_buf(), contents)
 }
 
 fn write(root: &Path, path: PathBuf, contents: &str) -> Result<()> {

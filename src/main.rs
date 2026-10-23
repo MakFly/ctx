@@ -404,6 +404,22 @@ enum HookCommand {
         #[arg(long)]
         expand_tokens: Option<usize>,
     },
+    /// Add ctx's search hooks to the user configuration of each harness under HOME.
+    Install {
+        /// claude, codex, grok, or all (the harnesses whose directory exists).
+        #[arg(long, default_value = "all")]
+        harness: String,
+        /// Home directory to configure (default: $HOME).
+        #[arg(long)]
+        home: Option<PathBuf>,
+    },
+    /// Remove exactly the hooks `ctx hook install` added, keeping everything else.
+    Uninstall {
+        #[arg(long, default_value = "all")]
+        harness: String,
+        #[arg(long)]
+        home: Option<PathBuf>,
+    },
     /// Compact a tool's search output in place (PostToolUse hook, Claude Grep).
     CompactOutput {
         #[arg(long)]
@@ -1531,6 +1547,8 @@ fn execute_hook(command: HookCommand) -> Result<()> {
             }
             Ok(())
         }
+        HookCommand::Install { harness, home } => apply_global_hooks(&harness, home, false),
+        HookCommand::Uninstall { harness, home } => apply_global_hooks(&harness, home, true),
         HookCommand::CompactOutput {
             harness,
             expand_tokens,
@@ -1553,6 +1571,31 @@ fn execute_hook(command: HookCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn apply_global_hooks(harness: &str, home: Option<PathBuf>, uninstall: bool) -> Result<()> {
+    let home = match home {
+        Some(home) => home,
+        None => {
+            PathBuf::from(std::env::var_os("HOME").context("HOME non défini; utilisez --home")?)
+        }
+    };
+    let outcomes = ctx_code::global_hooks::apply(&home, harness, uninstall)?;
+    let mut codex_added = false;
+    for outcome in &outcomes {
+        println!(
+            "{}: {} ({})",
+            outcome.harness,
+            outcome.change.label(),
+            outcome.path.display()
+        );
+        codex_added |=
+            outcome.harness == "codex" && outcome.change == ctx_code::global_hooks::Change::Added;
+    }
+    if codex_added {
+        println!("codex: approuvez le nouveau hook au prochain lancement (confiance des hooks).");
+    }
+    Ok(())
 }
 
 fn execute_embeddings(command: EmbeddingsCommand) -> Result<()> {

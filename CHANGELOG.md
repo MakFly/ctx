@@ -22,7 +22,11 @@
 - `ctx hook rewrite` (PreToolUse, Claude and Codex) turns an agent's search and
   plain-read lists into `ctx compact --run`; `ctx hook compact-output`
   (PostToolUse, Claude Grep) compacts Grep content results in place.
-  `ctx install --target claude` adds both hooks.
+  `ctx install --target claude` adds both hooks. The rewrite hook also reads
+  Grok payloads (`--harness grok`).
+- `ctx hook install` and `ctx hook uninstall` (`--harness
+  claude|codex|grok|all`, `--home DIR`) add or remove exactly ctx's search
+  hooks in each harness's user configuration, keeping everything else.
 
 ### Changed
 
