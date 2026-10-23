@@ -16,7 +16,6 @@ pub fn render_envelope_text(envelope: &Envelope, line_filter: Option<&Regex>) ->
     let mut lines = Vec::new();
     for (path, hits) in &groups {
         lines.push(path.clone());
-        let mut previous_end: Option<usize> = None;
 
         for hit in hits {
             let mut hit_lines = Vec::new();
@@ -70,14 +69,6 @@ pub fn render_envelope_text(envelope: &Envelope, line_filter: Option<&Regex>) ->
                 });
             }
 
-            if let (Some((start, end)), Some(previous)) = (printed_range, previous_end) {
-                if start > previous.saturating_add(1) {
-                    lines.push("--".to_owned());
-                }
-                previous_end = Some(previous.max(end));
-            } else if let Some((_, end)) = printed_range {
-                previous_end = Some(end);
-            }
             lines.extend(hit_lines);
         }
     }
@@ -161,7 +152,6 @@ mod tests {
             [
                 "a.rs",
                 "1:first",
-                "--",
                 "8:last",
                 "b.rs",
                 "3:other",

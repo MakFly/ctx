@@ -178,6 +178,18 @@ fn fill_outline(
     let (mut symbols, _) = parse_source(source, lang)?;
     symbols.sort_by_key(|symbol| (symbol.start, std::cmp::Reverse(symbol.end)));
     let mut shown = vec![false; lines.len() + 1];
+    // Locals declared inside a function or method body are not part of the outline.
+    let bodies: Vec<(usize, usize)> = symbols
+        .iter()
+        .filter(|symbol| matches!(symbol.kind.as_str(), "function" | "method"))
+        .map(|symbol| (symbol.start, symbol.end))
+        .collect();
+    symbols.retain(|symbol| {
+        matches!(symbol.kind.as_str(), "function" | "method" | "class")
+            || !bodies
+                .iter()
+                .any(|&(start, end)| start < symbol.start && symbol.end <= end)
+    });
     for symbol in symbols {
         let start = symbol.start.clamp(1, lines.len().max(1));
         let end = symbol.end.max(start);
@@ -242,18 +254,32 @@ pub fn render_read_text(output: &ReadOutput, raw: bool) -> String {
         .chain(output.elided.iter().map(|range| (range.0, 1, None, *range)))
         .collect::<Vec<_>>();
     items.sort_by_key(|item| (item.0, item.1));
+    // An outline of definitions already shows by its ranges what it leaves out.
+    let symbol_outline =
+        output.mode == "outline" && output.blocks.iter().any(|block| block.kind.is_some());
     for (_, _, block, range) in items {
         let Some(block) = block else {
-            out.push_str(&format!("... {}-{} elided\n", range.0, range.1));
+            if !symbol_outline {
+                out.push_str(&format!("... {}-{} elided\n", range.0, range.1));
+            }
             continue;
         };
         let kind = block.kind.as_deref().unwrap_or_default();
         let name = block.name.as_deref().unwrap_or_default();
         if output.mode == "outline" && block.kind.is_some() {
-            out.push_str(&format!(
-                "{}-{} {kind} {name}  {}\n",
-                block.start, block.end, block.text
-            ));
+            // One line per definition: its range and signature, indented by nesting depth.
+            let indent = "  ".repeat(name.matches('.').count());
+            let range = if block.start == block.end {
+                block.start.to_string()
+            } else {
+                format!("{}-{}", block.start, block.end)
+            };
+            let signature = block.text.trim();
+            if signature.is_empty() {
+                out.push_str(&format!("{indent}{range} {kind} {name}\n"));
+            } else {
+                out.push_str(&format!("{indent}{range} {signature}\n"));
+            }
             continue;
         }
         if output.mode == "symbol" {
@@ -511,6 +537,24 @@ mod tests {
     }
 
     #[test]
+    fn outline_leaves_out_locals_of_a_function_body() {
+        let source = "export const TOP = 1;\nexport function f(a: number): number {\n  const local = a + 1;\n  return local;\n}\n";
+        let (_dir, path) = write("a.ts", source.as_bytes());
+        let output = read_file(
+            &path,
+            &ReadOptions {
+                outline: true,
+                ..options()
+            },
+        )
+        .unwrap();
+        let text = render_read_text(&output, false);
+        assert!(text.contains("export function f"), "{text}");
+        assert!(text.contains("TOP"), "{text}");
+        assert!(!text.contains("const local"), "{text}");
+    }
+
+    #[test]
     fn outline_lists_symbols_in_order_with_elided_gaps() {
         let source = "import os\n\nclass A:\n    def one(self):\n        return 1\n\n    def two(self):\n        return 2\n\ndef free():\n    pass\n";
         let (_dir, path) = write("a.py", source.as_bytes());
@@ -540,7 +584,7 @@ mod tests {
         assert_eq!(output.blocks[1].text, "def one(self):");
         assert_eq!(output.elided, vec![(1, 2), (5, 6), (8, 9), (11, 11)]);
         let expected = format!(
-            "{} (11 lines, python)\n... 1-2 elided\n3-8 class A  class A:\n4-5 method A.one  def one(self):\n... 5-6 elided\n7-8 method A.two  def two(self):\n... 8-9 elided\n10-11 function free  def free():\n... 11-11 elided\n",
+            "{} (11 lines, python)\n3-8 class A:\n  4-5 def one(self):\n  7-8 def two(self):\n10-11 def free():\n",
             output.path
         );
         assert_eq!(render_read_text(&output, false), expected);

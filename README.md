@@ -30,7 +30,16 @@ ctx search 'solve_dependencies' --mode literal --json
 ctx search 'def (login|logout)' --mode regex --json
 ctx graph --op callers --symbol login --json
 ctx pack 'where is authentication handled?' --json
+ctx read src/auth.py --symbol login
+ctx read src/auth.py --lines 40:80
 ```
+
+`ctx read` prints exactly what it is asked for: a line range (`--raw` is
+byte-identical to the file), the full body of one definition (`--symbol`),
+or the file's definitions with their line ranges (`--outline`). Without a
+flag it prints the whole file when it fits its token budget (`--budget-tokens`,
+default 2000) and the outline otherwise, naming the elided ranges so an agent
+knows what to ask next. It parses the file itself and needs no index.
 
 Artifacts live under `.ctx/`. Set `CTX_DIR` to use another index directory.
 Git is optional and enables Git-aware freshness information.
@@ -119,6 +128,23 @@ The stdio server exposes `ctx_search`, `ctx_graph`, `ctx_pack` and `ctx_file`.
 
 Full `ctx_search` sends structured evidence once to protocol 2025-06-18+ clients;
 older clients also receive the text fallback. Compact pack output is unchanged.
+
+### Optional rewrite hook
+
+`ctx hook rewrite --harness claude|codex` is a PreToolUse hook that turns a
+few shell commands an agent already runs into bounded ctx commands, with no
+instruction in the prompt: a plain `rg` or `grep -rn` search becomes
+`ctx search` when the repository has an index, and `cat` of a file over 200
+lines becomes `ctx read`. Pipes, redirections, command chains, globs and
+unknown flags run unchanged, and the hook never blocks a command. It is not
+installed by default. For Claude Code, add to a settings file:
+
+~~~json
+{ "hooks": { "PreToolUse": [ { "matcher": "Bash",
+  "hooks": [ { "type": "command", "command": "ctx hook rewrite --harness claude" } ] } ] } }
+~~~
+
+For Codex, put the same structure with `--harness codex` in `hooks.json`.
 
 ## Live indexing and freshness
 
@@ -254,6 +280,16 @@ the returned evidence. The dashboard labels these estimates explicitly:
 they do not measure a reduction in provider usage or billing.
 Totals combining paired measurements and estimates are labeled `mixed`,
 including the JSON report's `savings_confidence` field.
+An estimate is never shown as a saving: it appears as context avoided against
+whole cited files, with no percentage and no efficiency meter. Measured pairs
+are shown on their own line, negative values included when ctx cost more.
+Import paired benchmark rows (JSON lines with `h`, `arm`, `q`, `rep`, `ok`,
+`warm` and the token fields) as measured pairs; re-importing a file does not
+count it twice:
+
+~~~console
+ctx metrics import-bench results.jsonl --arm ctx --base base
+~~~
 Configure model pricing when needed:
 
 ~~~console
