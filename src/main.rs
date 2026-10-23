@@ -179,6 +179,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Compact search output read from stdin: each path once, long lines shortened, bounded.
+    Compact {
+        /// Output lines kept before the rest is summarised.
+        #[arg(long, default_value_t = 250)]
+        max_lines: usize,
+        /// Characters of a match's text kept before it is shortened.
+        #[arg(long, default_value_t = 240)]
+        max_line_chars: usize,
+    },
     /// Receive a harness lifecycle event and enqueue background work.
     Hook {
         #[command(subcommand)]
@@ -377,6 +386,16 @@ enum HookCommand {
         harness: String,
         #[arg(long)]
         model: Option<String>,
+    },
+    /// Make a shell command cheaper to read without changing it (PreToolUse hook).
+    Rewrite {
+        #[arg(long)]
+        harness: String,
+    },
+    /// Compact a tool's search output in place (PostToolUse hook, Claude Grep).
+    CompactOutput {
+        #[arg(long)]
+        harness: String,
     },
 }
 
@@ -906,6 +925,24 @@ async fn execute(cli: Cli) -> Result<()> {
             },
             json,
         ),
+        Command::Compact {
+            max_lines,
+            max_line_chars,
+        } => {
+            let mut input = String::new();
+            io::stdin().read_to_string(&mut input)?;
+            print!(
+                "{}",
+                ctx_code::compact::compact(
+                    &input,
+                    ctx_code::compact::CompactOptions {
+                        max_lines: max_lines.max(1),
+                        max_line_chars: max_line_chars.max(1),
+                    }
+                )
+            );
+            Ok(())
+        }
         Command::Hook { command } => execute_hook(command),
         Command::Embeddings { command } => execute_embeddings(command),
         Command::Lsp { command } => execute_lsp(command).await,
@@ -1432,6 +1469,31 @@ fn execute_hook(command: HookCommand) -> Result<()> {
                 &payload,
             );
             ctx_code::reindex::request_async(&root, false)?;
+            Ok(())
+        }
+        HookCommand::Rewrite { harness } => {
+            // A PreToolUse hook never blocks: unreadable or unsupported input prints nothing.
+            let mut body = String::new();
+            let response = io::stdin()
+                .read_to_string(&mut body)
+                .ok()
+                .and_then(|_| serde_json::from_str::<Value>(&body).ok())
+                .and_then(|payload| ctx_code::hook_rewrite::hook_response(&payload, &harness));
+            if let Some(response) = response {
+                println!("{response}");
+            }
+            Ok(())
+        }
+        HookCommand::CompactOutput { harness } => {
+            let mut body = String::new();
+            let response = io::stdin()
+                .read_to_string(&mut body)
+                .ok()
+                .and_then(|_| serde_json::from_str::<Value>(&body).ok())
+                .and_then(|payload| ctx_code::hook_rewrite::post_tool_response(&payload, &harness));
+            if let Some(response) = response {
+                println!("{response}");
+            }
             Ok(())
         }
     }
