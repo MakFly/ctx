@@ -1777,7 +1777,8 @@ fn step_status(exit: std::process::ExitStatus) -> i32 {
 
 /// Runs one search and prints its compacted output; returns its status.
 fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> Result<i32> {
-    let mut child = match spawn_step(words, std::process::Stdio::piped())? {
+    let words = ctx_code::hook_rewrite::normalize_search(words);
+    let mut child = match spawn_step(&words, std::process::Stdio::piped())? {
         Ok(child) => child,
         Err(code) => return Ok(code),
     };

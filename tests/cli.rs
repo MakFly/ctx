@@ -897,9 +897,7 @@ fn hook_rewrite_leaves_rg_alone_when_an_rg_config_file_is_set() {
         .write_stdin(payload)
         .output()
         .unwrap();
-    assert!(
-        String::from_utf8_lossy(&plain.stdout).contains("ctx compact --run -- rg -H --null -n foo")
-    );
+    assert!(String::from_utf8_lossy(&plain.stdout).contains("ctx compact --run -- rg foo"));
 }
 
 #[test]
@@ -929,4 +927,23 @@ fn compact_run_runs_a_list_like_the_shell_keeping_and_and_then() {
     let then = run(&["grep", "-q", "gamma", "a.txt", "--then", "cat", "a.txt"]);
     assert_eq!(then.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&then.stdout), "alpha\nbeta\n");
+}
+
+#[test]
+fn compact_run_keeps_file_names_holding_delimiters_apart() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a"), "nothing\n").unwrap();
+    fs::write(temporary.path().join("a:1:b.rs"), "x\nmatch here\n").unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "match", "a:1:b.rs", "a"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("a:1:b.rs\n2:match here\n"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }

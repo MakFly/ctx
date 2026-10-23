@@ -381,7 +381,19 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
     // "where is this called from" on its own.
     let scoped = options.root.as_deref();
     let mut scope: Option<usize> = None;
-    for line in input.lines() {
+    // A NUL-separated file list (`-l --null`) is one record per name, each shown as is:
+    // a name is never read as a match, and each counts against the line limit.
+    let records: Vec<(&str, bool)> = input
+        .lines()
+        .flat_map(|line| match line.strip_suffix('\0') {
+            Some(list) => list
+                .split('\0')
+                .map(|name| (name, true))
+                .collect::<Vec<_>>(),
+            None => vec![(line, false)],
+        })
+        .collect();
+    for (line, literal) in records {
         // `--` only separates context groups; the line numbers already show the gaps.
         if line == "--" {
             continue;
@@ -389,12 +401,18 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
         // Once a line is left out, so is every later one: count it, read nothing for it.
         if omitted > 0 {
             omitted += 1;
-            if let Some((path, ..)) = parse_in(line, current, options.root.as_deref()) {
+            if let Some((path, ..)) = (!literal)
+                .then(|| parse_in(line, current, options.root.as_deref()))
+                .flatten()
+            {
                 omitted_paths.insert(path.to_owned());
             }
             continue;
         }
-        let rendered = match parse_in(line, current, options.root.as_deref()) {
+        let rendered = match (!literal)
+            .then(|| parse_in(line, current, options.root.as_deref()))
+            .flatten()
+        {
             Some((path, number, separator, text)) => {
                 // Kept for the expansion only once the line is shown.
                 let found = (separator == ':')
@@ -452,18 +470,8 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
                     found,
                 )
             }
-            // `--null` on a file list or a count: the NUL stands for a newline or a colon.
-            None => (
-                None,
-                None,
-                match line.strip_suffix('\0') {
-                    Some(list) => list.replace('\0', "\n"),
-                    None => line.replace('\0', ":"),
-                },
-                None,
-                None,
-                None,
-            ),
+            // `--null` on a count: the NUL stands for the colon.
+            None => (None, None, line.replace('\0', ":"), None, None, None),
         };
         let needed = 1 + usize::from(rendered.0.is_some()) + usize::from(rendered.1.is_some());
         if out.len() + needed > options.max_lines {
@@ -749,6 +757,23 @@ mod tests {
             compact("a.rs\u{0}b.rs\u{0}\n", CompactOptions::default()),
             "a.rs\nb.rs\n"
         );
+        // A listed name is never read as a match, and each one counts against the limit.
+        assert_eq!(
+            compact(
+                "a.rs\u{0}12:foo\u{0}a:1:b.rs\u{0}",
+                CompactOptions::default()
+            ),
+            "a.rs\n12:foo\na:1:b.rs\n"
+        );
+        let many: String = (0..20).map(|n| format!("f{n}.rs\u{0}")).collect();
+        let out = compact(
+            &many,
+            CompactOptions {
+                max_lines: 5,
+                ..CompactOptions::default()
+            },
+        );
+        assert_eq!(out.lines().count(), 6, "{out}");
         assert_eq!(
             compact("a.rs\u{0}3\n", CompactOptions::default()),
             "a.rs:3\n"
