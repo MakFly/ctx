@@ -229,7 +229,7 @@ impl ServerHandler for CtxMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Use ctx_pack for code exploration. Answer when evidence is sufficient; otherwise follow a relevant hint or narrow the query. Cite path:line spans. Use targeted source reads when evidence remains missing; partial coverage does not prove absence.",
+                "Use ctx_pack for code exploration. Answer when the requested facts are in the hits; otherwise follow a relevant hint or narrow the query. Cite path:line spans. Use targeted source reads when evidence remains missing; partial coverage does not prove absence.",
             )
     }
 }
@@ -284,7 +284,7 @@ impl ServerHandler for CompactCtxMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Call ctx_pack for code exploration. Answer when evidence is sufficient; otherwise follow a relevant hint or narrow the query. Cite exact path:line spans. Use targeted source reads when evidence remains missing; partial coverage does not prove absence.",
+                "Call ctx_pack for code exploration. Answer when the requested facts are in the hits; otherwise follow a relevant hint or narrow the query. Cite exact path:line spans. Use targeted source reads when evidence remains missing; partial coverage does not prove absence.",
             )
     }
 }
