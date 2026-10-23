@@ -293,9 +293,10 @@ fn parse_in<'a>(
     current: Option<&str>,
     root: Option<&Path>,
 ) -> Option<(&'a str, &'a str, char, &'a str)> {
-    let readings: Vec<_> = [parse_with(line, ':'), parse_with(line, '-')]
+    // Every split a path may end at: `a:1:b.rs:12:x` reads as `a` or as `a:1:b.rs`.
+    let readings: Vec<_> = parse_with(line, ':')
         .into_iter()
-        .flatten()
+        .chain(parse_with(line, '-'))
         .collect();
     readings
         .iter()
@@ -309,8 +310,9 @@ fn parse_in<'a>(
 
 /// Splits at the first `<sep><digits><sep>` after a non-empty path (a match line
 /// may also close its number with `-`, as context lines do).
-fn parse_with(line: &str, separator: char) -> Option<(&str, &str, char, &str)> {
+fn parse_with(line: &str, separator: char) -> Vec<(&str, &str, char, &str)> {
     let bytes = line.as_bytes();
+    let mut readings = Vec::new();
     let mut index = 0;
     while let Some(offset) = line[index..].find(separator) {
         let at = index + offset;
@@ -324,7 +326,7 @@ fn parse_with(line: &str, separator: char) -> Option<(&str, &str, char, &str)> {
             _ => bytes.get(after) == Some(&b'-'),
         };
         if at > 0 && digits > 0 && closes {
-            return Some((
+            readings.push((
                 &line[..at],
                 &line[at + 1..after],
                 bytes[after] as char,
@@ -333,7 +335,7 @@ fn parse_with(line: &str, separator: char) -> Option<(&str, &str, char, &str)> {
         }
         index = at + 1;
     }
-    None
+    readings
 }
 
 fn shorten(text: &str, max_chars: usize) -> String {
@@ -636,6 +638,25 @@ mod tests {
         assert_eq!(
             compact(input, CompactOptions::default()),
             "a.rs\n1:let s = 1;\n2-let t = \"10:20:30\";\n"
+        );
+    }
+
+    #[test]
+    fn a_path_holding_delimiters_is_read_whole_when_that_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a:1:b.rs"), "x\n").unwrap();
+        assert_eq!(
+            parse_in("a:1:b.rs:12:match", None, Some(dir.path())),
+            Some(("a:1:b.rs", "12", ':', "match"))
+        );
+        assert_eq!(
+            parse_in("a:1:b.rs:12:match", Some("a:1:b.rs"), None),
+            Some(("a:1:b.rs", "12", ':', "match"))
+        );
+        // With nothing to go on, the earliest delimiter wins.
+        assert_eq!(
+            parse_in("a:1:b.rs:12:match", None, None),
+            Some(("a", "1", ':', "b.rs:12:match"))
         );
     }
 

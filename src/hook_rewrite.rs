@@ -49,23 +49,22 @@ pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {
         {
             return None;
         }
-        if is_search(program, arguments) {
-            // Output without a path on each line is not what ctx compact reads.
-            if arguments
-                .iter()
-                .any(|argument| matches!(argument.as_str(), "--heading" | "--no-filename" | "-h"))
-            {
+        if let Some((shorts, longs)) = search_flags(program, arguments) {
+            let long = |name: &str| longs.iter().any(|flag| flag == name);
+            // Lines without a path or a number are not what ctx compact reads: a search
+            // that suppresses either (grep -h, rg -I, rg -N, --heading) is left alone.
+            let (no_path, no_number) = match program.as_str() {
+                "grep" => (shorts.contains('h') || long("--no-filename"), false),
+                _ => (
+                    shorts.contains('I') || long("--no-filename") || long("--heading"),
+                    shorts.contains('N') || long("--no-line-number"),
+                ),
+            };
+            if no_path || no_number {
                 return None;
             }
             searched = true;
-            // `-H -n` print the path and line number on every line, even for one file,
-            // so the lines parse and the source around them can be appended.
-            let numbered = arguments.iter().any(|argument| {
-                argument == "--line-number"
-                    || (argument.starts_with('-')
-                        && !argument.starts_with("--")
-                        && argument.contains('n'))
-            });
+            let numbered = shorts.contains('n') || long("--line-number");
             words.push(program.clone());
             words.push("-H".to_owned());
             if !numbered {
@@ -414,36 +413,45 @@ const GREP: SearchOptions = SearchOptions {
 /// A search whose output is `path:line:text` lines, with only options that select,
 /// match or format (see [`SearchOptions`]); operands are patterns and paths.
 fn is_search(program: &str, arguments: &[String]) -> bool {
+    search_flags(program, arguments).is_some()
+}
+
+/// The flags a search sets (short letters, and long options without their value), read
+/// as the tool reads them: bundles, attached values and `--`; `None` when an option is
+/// outside the known-safe set.
+fn search_flags(program: &str, arguments: &[String]) -> Option<(String, Vec<String>)> {
     let options = match program {
         // An rg config file may add `--pre` and friends, which this check cannot see.
         "rg" if std::env::var_os("RIPGREP_CONFIG_PATH").is_some_and(|path| !path.is_empty()) => {
-            return false;
+            return None;
         }
         "rg" => &RG,
         "grep" => &GREP,
-        _ => return false,
+        _ => return None,
     };
+    let (mut shorts, mut longs) = (String::new(), Vec::new());
     let mut index = 0;
     while index < arguments.len() {
         let argument = arguments[index].as_str();
         index += 1;
         if argument == "--" {
-            return true;
+            break;
         }
         if let Some(long) = argument.strip_prefix("--") {
             let name = format!("--{}", long.split('=').next().unwrap_or_default());
             if long.contains('=') {
                 if !options.long_valued.contains(&name.as_str()) {
-                    return false;
+                    return None;
                 }
             } else if options.long_valued.contains(&argument) {
                 if index >= arguments.len() {
-                    return false;
+                    return None;
                 }
                 index += 1;
             } else if !options.long_flags.contains(&argument) {
-                return false;
+                return None;
             }
+            longs.push(name);
             continue;
         }
         let Some(letters) = argument
@@ -457,18 +465,19 @@ fn is_search(program: &str, arguments: &[String]) -> bool {
                 // The rest of the word is the value, or the next word is.
                 if offset + letter.len_utf8() == letters.len() {
                     if index >= arguments.len() {
-                        return false;
+                        return None;
                     }
                     index += 1;
                 }
                 break;
             }
             if !options.flags.contains(letter) {
-                return false;
+                return None;
             }
+            shorts.push(letter);
         }
     }
-    true
+    Some((shorts, longs))
 }
 
 /// Splits on unquoted `|` (not `||`); `None` when a quote is left open.
@@ -775,6 +784,8 @@ mod tests {
                 "grep -F \"\\$HOME\" a.rs",
                 "ctx compact --run -- grep -H -n -F '$HOME' a.rs",
             ),
+            // `n` here is -e's value, not the numbering flag: -n is still added.
+            ("rg -en a.rs", "ctx compact --run -- rg -H -n -en a.rs"),
             // zsh expands a bare leading `=` to a program path.
             ("rg -n x '=ls'", "ctx compact --run -- rg -H -n x '=ls'"),
             (
@@ -870,8 +881,12 @@ mod tests {
             "rg foo ~/x",
             "rg --glob=~/x foo",
             "rg --heading foo",
-            "rg -h foo",
+            "rg -I foo",
             "grep --no-filename -r foo .",
+            // A bundled suppression is read like the tool reads it.
+            "grep -nh foo README.md",
+            "rg -N foo",
+            "rg --no-line-number foo",
             "rg =ls",
             "rg foo\u{a0}",
             "rg\u{a0}foo",
