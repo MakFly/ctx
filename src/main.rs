@@ -1779,14 +1779,14 @@ fn step_status(exit: std::process::ExitStatus) -> i32 {
 
 /// Runs one search and prints its compacted output; returns its status.
 fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> Result<i32> {
-    // File names and counts go straight to our stdout, byte for byte and unbounded:
-    // they are not `path:line:text`, and a name must never be cut or decoded.
-    if ctx_code::hook_rewrite::is_listing(words) {
+    // Output ctx compact does not read (file names, counts, no path per line, forced
+    // colour) goes straight to our stdout, byte for byte and unbounded.
+    let Some((normalized, added_null)) = ctx_code::hook_rewrite::normalize_search(words) else {
         return run_read(words);
-    }
+    };
     let mut options = options;
     options.context_separators = ctx_code::hook_rewrite::uses_context(words);
-    let words = ctx_code::hook_rewrite::normalize_search(words);
+    let words = normalized;
     let mut child = match spawn_step(&words, std::process::Stdio::piped())? {
         Ok(child) => child,
         Err(code) => return Ok(code),
@@ -1816,7 +1816,11 @@ fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> R
             let mut out = io::stdout().lock();
             let mut line = Vec::new();
             while lines.read_until(b'\n', &mut line)? > 0 {
-                out.write_all(&without_added_nul(&line))?;
+                if added_null {
+                    out.write_all(&without_added_nul(&line))?;
+                } else {
+                    out.write_all(&line)?;
+                }
                 line.clear();
             }
             drop(out);

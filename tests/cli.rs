@@ -1115,3 +1115,34 @@ fn compact_run_streams_output_past_the_cap_whole_even_if_late_bytes_are_not_utf8
     .concat();
     assert!(output.stdout.ends_with(&last));
 }
+
+#[cfg(unix)]
+#[test]
+fn compact_run_leaves_formats_it_does_not_read_byte_for_byte() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(
+        temporary.path().join("a.txt"),
+        b"before\nneedle\xff\0payload\nafter\n",
+    )
+    .unwrap();
+    for search in [
+        &["grep", "-ah", "needle", "a.txt"][..],
+        &["rg", "--color=always", "-C1", "-a", "needle", "a.txt"][..],
+    ] {
+        let direct = std::process::Command::new(search[0])
+            .args(&search[1..])
+            .current_dir(temporary.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let through = Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(temporary.path())
+            .args(["compact", "--run", "--"])
+            .args(search)
+            .output()
+            .unwrap();
+        assert_eq!(through.status.code(), direct.status.code(), "{search:?}");
+        assert_eq!(through.stdout, direct.stdout, "{search:?}");
+    }
+}

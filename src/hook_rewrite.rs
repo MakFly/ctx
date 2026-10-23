@@ -91,25 +91,41 @@ pub const RUN_AND: &str = "--and";
 pub const RUN_THEN: &str = "--then";
 const RUN_SEPARATORS: [&str; 2] = [RUN_AND, RUN_THEN];
 
-/// A search as `ctx compact --run` starts it. In content mode, `-H`, `--null` and `-n`
-/// are added when missing, so every line carries its path (ended by a NUL: no file name
-/// can be misread) and its number; file lists, counts and quiet searches run as written.
-pub fn normalize_search(words: &[String]) -> Vec<String> {
-    let Some((program, arguments)) = words.split_first() else {
-        return words.to_vec();
-    };
-    let Some((shorts, longs)) = search_flags(program, arguments) else {
-        return words.to_vec();
-    };
-    if lists_or_counts(program, &shorts, &longs) {
-        return words.to_vec();
-    }
+/// A search as `ctx compact --run` starts it to compact its output, and whether ctx added
+/// `--null`: `-H`, `--null` and `-n` are added when missing, so every line carries its
+/// path (ended by a NUL: no file name can be misread) and its number. `None` for output
+/// ctx compact does not read (file lists, counts, quiet searches, no path per line, a
+/// heading, forced colour): `--run` passes that through as the search wrote it.
+pub fn normalize_search(words: &[String]) -> Option<(Vec<String>, bool)> {
+    let (program, arguments) = words.split_first()?;
+    let (shorts, longs) = search_flags(program, arguments)?;
     let long = |name: &str| longs.iter().any(|flag| flag == name);
+    // A format ctx compact does not read stays as written too: no path on each line
+    // (grep -h, rg -I), a heading per file, or forced colour codes around the fields.
+    let no_path = match program.as_str() {
+        "grep" => shorts.contains('h') || long("--no-filename"),
+        _ => shorts.contains('I') || long("--no-filename") || long("--heading"),
+    };
+    let forced_colour = arguments.iter().enumerate().any(|(index, argument)| {
+        let forced = |value: &str| matches!(value, "always" | "ansi");
+        match argument.split_once('=') {
+            Some(("--color" | "--colour", value)) => forced(value),
+            _ => {
+                matches!(argument.as_str(), "--color" | "--colour")
+                    && arguments.get(index + 1).is_some_and(|value| forced(value))
+            }
+        }
+    });
+    if lists_or_counts(program, &shorts, &longs) || no_path || forced_colour {
+        return None;
+    }
     let mut out = vec![program.clone()];
     if !(shorts.contains('H') || long("--with-filename")) {
         out.push("-H".to_owned());
     }
-    if !long("--null") {
+    // Only a NUL ctx added is read back as `:` or `-`; one the search asked for stays.
+    let added_null = !long("--null");
+    if added_null {
         out.push("--null".to_owned());
     }
     let unnumbered = program == "rg" && (shorts.contains('N') || long("--no-line-number"));
@@ -117,16 +133,7 @@ pub fn normalize_search(words: &[String]) -> Vec<String> {
         out.push("-n".to_owned());
     }
     out.extend(arguments.iter().cloned());
-    out
-}
-
-/// A search printing file names, counts or nothing (`-l`, `--files`, `-c`, `-q`...):
-/// its output is not `path:line:text`, so `ctx compact --run` prints it as is.
-pub fn is_listing(words: &[String]) -> bool {
-    words.split_first().is_some_and(|(program, arguments)| {
-        search_flags(program, arguments)
-            .is_some_and(|(shorts, longs)| lists_or_counts(program, &shorts, &longs))
-    })
+    Some((out, added_null))
 }
 
 fn lists_or_counts(program: &str, shorts: &str, longs: &[String]) -> bool {
@@ -381,7 +388,7 @@ struct SearchOptions {
 }
 
 const RG: SearchOptions = SearchOptions {
-    flags: "nNHhiSswxFUPvcloLuIq",
+    flags: "nNHhiSswxFUPvcloLuIqa",
     valued: "egtTCABmMdj",
     long_flags: &[
         "--line-number",
@@ -409,6 +416,7 @@ const RG: SearchOptions = SearchOptions {
         "--follow",
         "--no-heading",
         "--quiet",
+        "--text",
         "--heading",
         "--trim",
         "--column",
@@ -912,19 +920,38 @@ mod tests {
     #[test]
     fn the_runner_gives_every_content_search_its_path_and_number() {
         let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
-        for (search, started) in [
-            ("rg foo", "rg -H --null -n foo"),
+        for (search, started, added) in [
+            ("rg foo", Some("rg -H --null -n foo"), true),
             // `n` here is -e's value, not the numbering flag.
-            ("rg -en a.rs", "rg -H --null -n -en a.rs"),
-            ("grep -rnH --null foo .", "grep -rnH --null foo ."),
-            ("rg -N foo", "rg -H --null -N foo"),
-            // File lists, counts and quiet searches run as written.
-            ("rg -l foo", "rg -l foo"),
-            ("grep -c foo a", "grep -c foo a"),
-            ("rg -q foo", "rg -q foo"),
-            ("rg -L foo", "rg -H --null -n -L foo"),
+            ("rg -en a.rs", Some("rg -H --null -n -en a.rs"), true),
+            // A NUL the search asked for is its own: not read back.
+            (
+                "grep -rnH --null foo .",
+                Some("grep -rnH --null foo ."),
+                false,
+            ),
+            ("rg -N foo", Some("rg -H --null -N foo"), true),
+            ("rg -L foo", Some("rg -H --null -n -L foo"), true),
+            (
+                "rg --color=never foo",
+                Some("rg -H --null -n --color=never foo"),
+                true,
+            ),
+            // File lists, counts, quiet searches and formats ctx compact does not read
+            // pass through as written.
+            ("rg -l foo", None, false),
+            ("grep -c foo a", None, false),
+            ("rg -q foo", None, false),
+            ("grep -ah needle .", None, false),
+            ("rg --heading foo", None, false),
+            ("rg --color=always -C1 foo", None, false),
+            ("rg --color always foo", None, false),
         ] {
-            assert_eq!(normalize_search(&words(search)), words(started), "{search}");
+            assert_eq!(
+                normalize_search(&words(search)),
+                started.map(|started| (words(started), added)),
+                "{search}"
+            );
         }
     }
 
