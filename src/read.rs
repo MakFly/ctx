@@ -134,6 +134,7 @@ pub fn read_file(path: &Path, options: &ReadOptions) -> Result<ReadOutput> {
             ));
         }
         fill_outline(&mut output, &source, &lines, lang, options.budget_tokens)?;
+        fit_rendered_outline(&mut output, options.budget_tokens);
     } else if !lines.is_empty() {
         output.blocks.push(ReadBlock {
             start: 1,
@@ -144,6 +145,47 @@ pub fn read_file(path: &Path, options: &ReadOptions) -> Result<ReadOutput> {
         });
     }
     Ok(output)
+}
+
+/// Drops trailing outline entries until the rendered text (header, ranges,
+/// note) fits the budget, and says how many definitions were left out.
+fn fit_rendered_outline(output: &mut ReadOutput, budget_tokens: usize) {
+    let budget = budget_tokens.max(1);
+    let symbol_blocks = output
+        .blocks
+        .iter()
+        .filter(|block| block.kind.is_some())
+        .count();
+    if symbol_blocks == 0 {
+        return;
+    }
+    let note = output.note.clone();
+    let mut dropped = Vec::new();
+    loop {
+        let tokens = estimate_tokens(&render_read_text(output, false));
+        if tokens <= budget || output.blocks.is_empty() {
+            break;
+        }
+        // Remove in proportion to the overshoot, at least one entry per pass.
+        let excess = (tokens - budget) * output.blocks.len() / tokens;
+        for _ in 0..excess.max(1) {
+            if let Some(block) = output.blocks.pop() {
+                dropped.push(block.start);
+            }
+        }
+        if let Some(line) = dropped.iter().min() {
+            let message = format!(
+                "outline over the {budget}-token budget: {} more definitions from line {line} not shown; use --lines A:B or a larger --budget-tokens",
+                dropped.len()
+            );
+            output.note = Some(match &note {
+                Some(previous) if !previous.starts_with("outline over") => {
+                    format!("{previous}; {message}")
+                }
+                _ => message,
+            });
+        }
+    }
 }
 
 fn fill_outline(
@@ -201,16 +243,8 @@ fn fill_outline(
                 .iter()
                 .any(|&(start, end)| start < symbol.start && symbol.end <= end)
     });
-    // One outline line per definition, as many as fit the budget.
-    let (mut used, mut omitted, mut first_omitted) = (0usize, 0usize, None);
+    // One outline line per definition; fit_rendered_outline applies the budget.
     for symbol in symbols {
-        let cost = estimate_tokens(&symbol.sig) + 3;
-        if used + cost > budget {
-            omitted += 1;
-            first_omitted.get_or_insert(symbol.start);
-            continue;
-        }
-        used += cost;
         let start = symbol.start.clamp(1, lines.len().max(1));
         let end = symbol.end.max(start);
         if start <= lines.len() {
@@ -237,15 +271,6 @@ fn fill_outline(
     }
     if let Some(first) = gap_start {
         output.elided.push((first, lines.len()));
-    }
-    if let Some(line) = first_omitted {
-        let message = format!(
-            "outline over the {budget}-token budget: {omitted} more definitions from line {line} not shown; use --lines A:B or a larger --budget-tokens"
-        );
-        output.note = Some(match output.note.take() {
-            Some(previous) => format!("{previous}; {message}"),
-            None => message,
-        });
     }
     Ok(())
 }
@@ -581,7 +606,7 @@ mod tests {
         )
         .unwrap();
         let text = render_read_text(&output, false);
-        assert!(estimate_tokens(&text) <= 200, "{text}");
+        assert!(estimate_tokens(&text) <= 100, "{text}");
         assert!(
             output
                 .note

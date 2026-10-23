@@ -420,8 +420,8 @@ pub fn status(root: &Path, global: bool) -> Result<Value> {
     let connection = open_database(&path)?;
     let (events, cache_hits, ctx_tokens, input_tokens, output_tokens): (u64, u64, u64, u64, u64) =
         connection.query_row(
-            "SELECT count(*), COALESCE(sum(cache_hit),0), COALESCE(sum(ctx_tokens),0),
-                    COALESCE(sum(input_tokens),0), COALESCE(sum(output_tokens),0) FROM events",
+            "SELECT count(*), CAST(total(cache_hit) AS INTEGER), CAST(total(ctx_tokens) AS INTEGER),
+                    CAST(total(input_tokens) AS INTEGER), CAST(total(output_tokens) AS INTEGER) FROM events",
             [],
             |row| {
                 Ok((
@@ -551,6 +551,7 @@ pub fn import_bench(root: &Path, file: &Path, arm: &str, base: &str) -> Result<(
     let reader = BufReader::new(fs::File::open(&canonical)?);
     let mut arm_rows = Vec::new();
     let mut base_rows = std::collections::HashMap::new();
+    let mut arm_seen = std::collections::HashMap::new();
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -573,11 +574,33 @@ pub fn import_bench(root: &Path, file: &Path, arm: &str, base: &str) -> Result<(
         );
         let usable = !row.get("warm").and_then(Value::as_bool).unwrap_or(false)
             && row.get("ok").and_then(Value::as_bool).unwrap_or(true);
+        // The same (h, q, rep) twice in one arm with different tokens is ambiguous: refuse it.
         if row_arm == arm {
-            arm_rows.push((key, usable.then(|| bench_usage(&row)).flatten()));
+            let usage = usable.then(|| bench_usage(&row)).flatten();
+            if let Some(previous) = arm_seen.insert(key.clone(), usage)
+                && previous != usage
+            {
+                bail!(
+                    "conflicting duplicate rows for {}/{}#{} in arm {arm}",
+                    key.0,
+                    key.1,
+                    key.2
+                );
+            }
+            if !arm_rows.iter().any(|(seen, _)| *seen == key) {
+                arm_rows.push((key, usage));
+            }
         } else if row_arm == base && usable {
-            if let Some(usage) = bench_usage(&row) {
-                base_rows.insert(key, usage);
+            if let Some(usage) = bench_usage(&row)
+                && let Some(previous) = base_rows.insert(key.clone(), usage)
+                && previous != usage
+            {
+                bail!(
+                    "conflicting duplicate rows for {}/{}#{} in arm {base}",
+                    key.0,
+                    key.1,
+                    key.2
+                );
             }
         }
     }
@@ -1028,7 +1051,9 @@ fn accumulate(state: &mut AggregateState, event: &MetricEvent, pricing: &[Pricin
             }
         }
     }
-    state.saved_output_tokens += event.saved_output_tokens.unwrap_or(0);
+    state.saved_output_tokens = state
+        .saved_output_tokens
+        .saturating_add(event.saved_output_tokens.unwrap_or(0));
     if let Some(cost) = event_cost(event, pricing) {
         *state.cost_usd.get_or_insert(0.0) += cost;
     }
@@ -1063,20 +1088,30 @@ fn accumulate_group(
         });
     group.events += 1;
     group.cache_hits += event.cache_hit as u64;
-    group.ctx_tokens += event.ctx_tokens.unwrap_or(0);
-    group.input_tokens += event.input_tokens.unwrap_or(0);
-    group.output_tokens += event.output_tokens.unwrap_or(0);
-    group.duration_ms += event.duration_ms.unwrap_or(0);
+    group.ctx_tokens = group
+        .ctx_tokens
+        .saturating_add(event.ctx_tokens.unwrap_or(0));
+    group.input_tokens = group
+        .input_tokens
+        .saturating_add(event.input_tokens.unwrap_or(0));
+    group.output_tokens = group
+        .output_tokens
+        .saturating_add(event.output_tokens.unwrap_or(0));
+    group.duration_ms = group
+        .duration_ms
+        .saturating_add(event.duration_ms.unwrap_or(0));
     if event.kind != "baseline" {
         if let Some(baseline) = event.baseline_input_tokens {
-            *group.baseline_input_tokens.get_or_insert(0) += baseline;
+            let total = group.baseline_input_tokens.get_or_insert(0);
+            *total = total.saturating_add(baseline);
         }
     }
     if let Some(cost) = event_cost(event, pricing) {
         *group.estimated_cost_usd.get_or_insert(0.0) += cost;
     }
     if let Some(saved) = event.saved_input_tokens {
-        *group.saved_input_tokens.get_or_insert(0) += saved;
+        let total = group.saved_input_tokens.get_or_insert(0);
+        *total = total.saturating_add(saved);
     }
     if let Some(cost) = event_savings_cost(event, pricing) {
         *group.estimated_saved_cost_usd.get_or_insert(0.0) += cost;
@@ -1529,6 +1564,39 @@ mod tests {
             import_bench(root, &results, "ctx", "plain").unwrap(),
             (1, 0)
         );
+    }
+
+    #[test]
+    fn import_bench_refuses_conflicting_duplicate_rows() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let directory = ctx_dir(&repo_root(root).unwrap());
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("config.toml"), "[metrics]\nglobal = false\n").unwrap();
+        let results = root.join("results.jsonl");
+        let row = |arm: &str, uncached: u64| {
+            format!(
+                r#"{{"h":"a","arm":"{arm}","q":"one","rep":1,"ok":true,"uncached":{uncached},"cacheWrite":0,"cacheRead":0,"output":5}}"#
+            )
+        };
+        fs::write(
+            &results,
+            [row("base", 100), row("base", 90), row("ctx", 120)].join("\n"),
+        )
+        .unwrap();
+        assert!(import_bench(root, &results, "ctx", "base").is_err());
+        fs::write(
+            &results,
+            [row("base", 100), row("ctx", 120), row("ctx", 130)].join("\n"),
+        )
+        .unwrap();
+        assert!(import_bench(root, &results, "ctx", "base").is_err());
+        fs::write(
+            &results,
+            [row("base", 100), row("base", 100), row("ctx", 120)].join("\n"),
+        )
+        .unwrap();
+        assert_eq!(import_bench(root, &results, "ctx", "base").unwrap(), (1, 0));
     }
 
     #[test]
