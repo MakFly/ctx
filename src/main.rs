@@ -400,6 +400,9 @@ enum HookCommand {
     Rewrite {
         #[arg(long)]
         harness: String,
+        /// Token budget for the source appended to each rewritten search.
+        #[arg(long)]
+        expand_tokens: Option<usize>,
     },
     /// Compact a tool's search output in place (PostToolUse hook, Claude Grep).
     CompactOutput {
@@ -1503,14 +1506,19 @@ fn execute_hook(command: HookCommand) -> Result<()> {
             ctx_code::reindex::request_async(&root, false)?;
             Ok(())
         }
-        HookCommand::Rewrite { harness } => {
+        HookCommand::Rewrite {
+            harness,
+            expand_tokens,
+        } => {
             // A PreToolUse hook never blocks: unreadable or unsupported input prints nothing.
             let mut body = String::new();
             let response = io::stdin()
                 .read_to_string(&mut body)
                 .ok()
                 .and_then(|_| serde_json::from_str::<Value>(&body).ok())
-                .and_then(|payload| ctx_code::hook_rewrite::hook_response(&payload, &harness));
+                .and_then(|payload| {
+                    ctx_code::hook_rewrite::hook_response_with(&payload, &harness, expand_tokens)
+                });
             if let Some(response) = response {
                 println!("{response}");
             }

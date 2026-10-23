@@ -488,6 +488,16 @@ fn split_pipeline(command: &str) -> Option<Vec<&str>> {
 
 /// Builds the hook response for a PreToolUse payload, or `None` when nothing is rewritten.
 pub fn hook_response(payload: &Value, harness: &str) -> Option<Value> {
+    hook_response_with(payload, harness, None)
+}
+
+/// [`hook_response`] with the token budget for the source appended to each search
+/// (`None`: the `ctx compact` default).
+pub fn hook_response_with(
+    payload: &Value,
+    harness: &str,
+    expand_tokens: Option<usize>,
+) -> Option<Value> {
     if !matches!(harness, "claude" | "codex") {
         return None;
     }
@@ -513,7 +523,14 @@ pub fn hook_response(payload: &Value, harness: &str) -> Option<Value> {
     if harness == "codex" && split_cd_prefix(command)?.1.is_some() {
         return None;
     }
-    let rewritten = rewrite_command(command, &cwd)?;
+    let mut rewritten = rewrite_command(command, &cwd)?;
+    if let Some(tokens) = expand_tokens {
+        rewritten = rewritten.replacen(
+            "ctx compact --run -- ",
+            &format!("ctx compact --expand-tokens {tokens} --run -- "),
+            1,
+        );
+    }
     let mut updated = tool_input.clone();
     updated.insert(field.to_owned(), Value::String(rewritten));
     let mut output = json!({
@@ -982,6 +999,16 @@ mod tests {
         assert!(
             content.starts_with("a.ts\n2:two\naround the matches:\n## a.ts 1-3\n"),
             "{content}"
+        );
+    }
+
+    #[test]
+    fn a_budget_given_to_the_hook_reaches_the_rewritten_search() {
+        let payload = json!({"tool_name": "Bash", "cwd": "/", "tool_input": {"command": "rg foo"}});
+        let out = hook_response_with(&payload, "codex", Some(600)).unwrap();
+        assert_eq!(
+            out["hookSpecificOutput"]["updatedInput"]["command"],
+            "ctx compact --expand-tokens 600 --run -- rg -H foo"
         );
     }
 
