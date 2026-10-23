@@ -383,19 +383,15 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
     let mut scope: Option<usize> = None;
     // A NUL-separated file list (`-l --null`) is one record per name, each shown as is:
     // a name is never read as a match, and each counts against the line limit.
-    let records: Vec<(&str, bool)> = input
-        .lines()
-        .flat_map(|line| match line.strip_suffix('\0') {
-            Some(list) => list
-                .split('\0')
-                .map(|name| (name, true))
-                .collect::<Vec<_>>(),
-            None => vec![(line, false)],
-        })
-        .collect();
+    let records: Vec<(&str, bool)> =
+        match input.strip_suffix('\n').unwrap_or(input).strip_suffix('\0') {
+            // Split on NUL alone: a listed name may itself hold a newline.
+            Some(list) => list.split('\0').map(|name| (name, true)).collect(),
+            None => input.lines().map(|line| (line, false)).collect(),
+        };
     for (line, literal) in records {
         // `--` only separates context groups; the line numbers already show the gaps.
-        if line == "--" {
+        if !literal && line == "--" {
             continue;
         }
         // Once a line is left out, so is every later one: count it, read nothing for it.
@@ -774,6 +770,11 @@ mod tests {
             },
         );
         assert_eq!(out.lines().count(), 6, "{out}");
+        // A name holding a newline is one record; a name `--` is kept.
+        assert_eq!(
+            compact("a\nname\u{0}--\u{0}b\u{0}", CompactOptions::default()),
+            "a\nname\n--\nb\n"
+        );
         assert_eq!(
             compact("a.rs\u{0}3\n", CompactOptions::default()),
             "a.rs:3\n"

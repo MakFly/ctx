@@ -354,7 +354,7 @@ struct SearchOptions {
 }
 
 const RG: SearchOptions = SearchOptions {
-    flags: "nNHhiSswxFUPvcloLuI",
+    flags: "nNHhiSswxFUPvcloLuIq",
     valued: "egtTCABmMdj",
     long_flags: &[
         "--line-number",
@@ -381,6 +381,7 @@ const RG: SearchOptions = SearchOptions {
         "--no-ignore-vcs",
         "--follow",
         "--no-heading",
+        "--quiet",
         "--heading",
         "--trim",
         "--column",

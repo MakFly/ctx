@@ -947,3 +947,21 @@ fn compact_run_keeps_file_names_holding_delimiters_apart() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[test]
+fn compact_run_runs_a_quiet_rg_as_written() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a.txt"), "alpha\n").unwrap();
+    let run = |pattern: &str| {
+        Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(temporary.path())
+            .args(["compact", "--run", "--", "rg", "-q", pattern, "a.txt"])
+            .output()
+            .unwrap()
+    };
+    let found = run("alpha");
+    assert_eq!(found.status.code(), Some(0));
+    assert!(found.stdout.is_empty());
+    assert_eq!(run("gamma").status.code(), Some(1));
+}
