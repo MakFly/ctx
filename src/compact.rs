@@ -293,17 +293,39 @@ fn parse_in<'a>(
     current: Option<&str>,
     root: Option<&Path>,
 ) -> Option<(&'a str, &'a str, char, &'a str)> {
+    // `--null` output ends the path with a NUL: no guessing.
+    if let Some((path, rest)) = line.split_once('\0') {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let separator = rest.as_bytes().get(digits).copied()?;
+        return (!path.is_empty() && digits > 0 && matches!(separator, b':' | b'-')).then(|| {
+            (
+                path,
+                &rest[..digits],
+                separator as char,
+                &rest[digits + 1..],
+            )
+        });
+    }
     // Every split a path may end at: `a:1:b.rs:12:x` reads as `a` or as `a:1:b.rs`.
     let readings: Vec<_> = parse_with(line, ':')
         .into_iter()
         .chain(parse_with(line, '-'))
         .collect();
+    if let Some(root) = root {
+        let existing: Vec<_> = readings
+            .iter()
+            .filter(|(path, ..)| root.join(path).is_file())
+            .collect();
+        match existing.as_slice() {
+            [one] => return Some(**one),
+            // Two real files could own this line: it is left as it is, unattributed.
+            [_, _, ..] => return None,
+            [] => {}
+        }
+    }
     readings
         .iter()
         .find(|(path, ..)| Some(*path) == current)
-        .or_else(|| {
-            root.and_then(|root| readings.iter().find(|(path, ..)| root.join(path).is_file()))
-        })
         .or_else(|| readings.iter().min_by_key(|(path, ..)| path.len()))
         .copied()
 }
@@ -430,7 +452,18 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
                     found,
                 )
             }
-            None => (None, None, line.to_owned(), None, None, None),
+            // `--null` on a file list or a count: the NUL stands for a newline or a colon.
+            None => (
+                None,
+                None,
+                match line.strip_suffix('\0') {
+                    Some(list) => list.replace('\0', "\n"),
+                    None => line.replace('\0', ":"),
+                },
+                None,
+                None,
+                None,
+            ),
         };
         let needed = 1 + usize::from(rendered.0.is_some()) + usize::from(rendered.1.is_some());
         if out.len() + needed > options.max_lines {
@@ -653,6 +686,17 @@ mod tests {
             parse_in("a:1:b.rs:12:match", Some("a:1:b.rs"), None),
             Some(("a:1:b.rs", "12", ':', "match"))
         );
+        // Two real files could own the line: it is left unattributed.
+        std::fs::write(dir.path().join("a"), "x\n").unwrap();
+        assert_eq!(
+            parse_in("a:1:b.rs:12:match", Some("a"), Some(dir.path())),
+            None
+        );
+        // A NUL ends the path (`--null`): no guessing at all.
+        assert_eq!(
+            parse_in("a:1:b.rs\u{0}12:match", Some("a"), Some(dir.path())),
+            Some(("a:1:b.rs", "12", ':', "match"))
+        );
         // With nothing to go on, the earliest delimiter wins.
         assert_eq!(
             parse_in("a:1:b.rs:12:match", None, None),
@@ -696,6 +740,18 @@ mod tests {
         assert_eq!(
             out,
             "a.rs\n1:x\n2:y\n... 2 more lines in 2 files not shown; narrow the search\n"
+        );
+    }
+
+    #[test]
+    fn a_null_separated_file_list_or_count_reads_as_without_null() {
+        assert_eq!(
+            compact("a.rs\u{0}b.rs\u{0}\n", CompactOptions::default()),
+            "a.rs\nb.rs\n"
+        );
+        assert_eq!(
+            compact("a.rs\u{0}3\n", CompactOptions::default()),
+            "a.rs:3\n"
         );
     }
 

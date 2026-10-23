@@ -897,7 +897,9 @@ fn hook_rewrite_leaves_rg_alone_when_an_rg_config_file_is_set() {
         .write_stdin(payload)
         .output()
         .unwrap();
-    assert!(String::from_utf8_lossy(&plain.stdout).contains("ctx compact --run -- rg -H -n foo"));
+    assert!(
+        String::from_utf8_lossy(&plain.stdout).contains("ctx compact --run -- rg -H --null -n foo")
+    );
 }
 
 #[test]

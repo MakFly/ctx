@@ -67,6 +67,8 @@ pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {
             let numbered = shorts.contains('n') || long("--line-number");
             words.push(program.clone());
             words.push("-H".to_owned());
+            // The path ends with a NUL, so no file name can be misread as `path:N:`.
+            words.push("--null".to_owned());
             if !numbered {
                 words.push("-n".to_owned());
             }
@@ -348,6 +350,7 @@ const RG: SearchOptions = SearchOptions {
         "--byte-offset",
         "--vimgrep",
         "--files",
+        "--null",
     ],
     long_valued: &[
         "--regexp",
@@ -393,6 +396,7 @@ const GREP: SearchOptions = SearchOptions {
         "--no-messages",
         "--quiet",
         "--silent",
+        "--null",
     ],
     long_valued: &[
         "--regexp",
@@ -773,24 +777,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path();
         for (command, rewritten) in [
-            ("rg -n foo", "ctx compact --run -- rg -H -n foo"),
+            ("rg -n foo", "ctx compact --run -- rg -H --null -n foo"),
             (
                 "rg -n \"a|b\" src -g '*.ts'",
-                "ctx compact --run -- rg -H -n 'a|b' src -g '*.ts'",
+                "ctx compact --run -- rg -H --null -n 'a|b' src -g '*.ts'",
             ),
-            ("grep -rn foo .", "ctx compact --run -- grep -H -rn foo ."),
+            (
+                "grep -rn foo .",
+                "ctx compact --run -- grep -H --null -rn foo .",
+            ),
             // Inside double quotes `\$` is a literal `$`, kept so by the requoted word.
             (
                 "grep -F \"\\$HOME\" a.rs",
-                "ctx compact --run -- grep -H -n -F '$HOME' a.rs",
+                "ctx compact --run -- grep -H --null -n -F '$HOME' a.rs",
             ),
             // `n` here is -e's value, not the numbering flag: -n is still added.
-            ("rg -en a.rs", "ctx compact --run -- rg -H -n -en a.rs"),
+            (
+                "rg -en a.rs",
+                "ctx compact --run -- rg -H --null -n -en a.rs",
+            ),
             // zsh expands a bare leading `=` to a program path.
-            ("rg -n x '=ls'", "ctx compact --run -- rg -H -n x '=ls'"),
+            (
+                "rg -n x '=ls'",
+                "ctx compact --run -- rg -H --null -n x '=ls'",
+            ),
             (
                 "rg -n \"it's\" a.rs",
-                "ctx compact --run -- rg -H -n 'it'\\''s' a.rs",
+                "ctx compact --run -- rg -H --null -n 'it'\\''s' a.rs",
             ),
         ] {
             assert_eq!(
@@ -802,7 +815,7 @@ mod tests {
         std::fs::create_dir_all(cwd.join("src")).unwrap();
         assert_eq!(
             rewrite_command("cd src && rg -n foo", cwd).unwrap(),
-            "cd src && ctx compact --run -- rg -H -n foo"
+            "cd src && ctx compact --run -- rg -H --null -n foo"
         );
     }
 
@@ -816,7 +829,7 @@ mod tests {
         let out = hook_response(&exec, "codex").unwrap();
         assert_eq!(
             out["hookSpecificOutput"]["updatedInput"]["cmd"],
-            "ctx compact --run -- rg -H -n foo"
+            "ctx compact --run -- rg -H --null -n foo"
         );
         assert!(
             out["hookSpecificOutput"]["updatedInput"]
@@ -843,10 +856,13 @@ mod tests {
     fn a_run_list_is_parsed_into_checked_steps_with_their_operators() {
         let words = |text: &str| text.split(' ').map(str::to_owned).collect::<Vec<_>>();
         assert_eq!(
-            parse_run(&words("sed -n 1,2p a.rs --and rg -H foo --then cat b.rs")).unwrap(),
+            parse_run(&words(
+                "sed -n 1,2p a.rs --and rg -H --null foo --then cat b.rs"
+            ))
+            .unwrap(),
             vec![
                 (false, RunStep::Read(words("sed -n 1,2p a.rs"))),
-                (true, RunStep::Search(words("rg -H foo"))),
+                (true, RunStep::Search(words("rg -H --null foo"))),
                 (false, RunStep::Read(words("cat b.rs"))),
             ]
         );
@@ -941,11 +957,11 @@ mod tests {
         let cwd = dir.path();
         assert_eq!(
             rewrite_command("sed -n '1,20p' a.rs; rg -n foo src", cwd).unwrap(),
-            "ctx compact --run -- sed -n 1,20p a.rs --then rg -H -n foo src"
+            "ctx compact --run -- sed -n 1,20p a.rs --then rg -H --null -n foo src"
         );
         assert_eq!(
             rewrite_command("rg -n a && rg -n b", cwd).unwrap(),
-            "ctx compact --run -- rg -H -n a --and rg -H -n b"
+            "ctx compact --run -- rg -H --null -n a --and rg -H --null -n b"
         );
         // A filtered search makes the pipeline's status the filter's: left alone.
         assert!(rewrite_command("rg -n a && rg -n b | head -5", cwd).is_none());
@@ -1051,7 +1067,7 @@ mod tests {
         let out = hook_response_with(&payload, "codex", Some(600)).unwrap();
         assert_eq!(
             out["hookSpecificOutput"]["updatedInput"]["command"],
-            "ctx compact --expand-tokens 600 --run -- rg -H -n foo"
+            "ctx compact --expand-tokens 600 --run -- rg -H --null -n foo"
         );
     }
 
@@ -1065,7 +1081,7 @@ mod tests {
         let claude = hook_response(&payload, "claude").unwrap();
         assert_eq!(
             claude["hookSpecificOutput"]["updatedInput"]["command"],
-            "ctx compact --run -- rg -H -n foo"
+            "ctx compact --run -- rg -H --null -n foo"
         );
         assert_eq!(
             claude["hookSpecificOutput"]["updatedInput"]["description"],
