@@ -333,13 +333,21 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
         if line == "--" {
             continue;
         }
+        // Once a line is left out, so is every later one: count it, read nothing for it.
+        if omitted > 0 {
+            omitted += 1;
+            if let Some((path, ..)) = parse(line) {
+                omitted_paths.insert(path.to_owned());
+            }
+            continue;
+        }
         let rendered = match parse(line) {
             Some((path, number, separator, text)) => {
-                if separator == ':'
-                    && let Ok(number) = number.parse::<usize>()
-                {
-                    matches.push((path.to_owned(), number, text.to_owned()));
-                }
+                // Kept for the expansion only once the line is shown.
+                let found = (separator == ':')
+                    .then(|| number.parse::<usize>().ok())
+                    .flatten()
+                    .map(|number| (path.to_owned(), number, text.to_owned()));
                 let header = (current != Some(path)).then(|| path.to_owned());
                 // Display state moves only once these lines are accepted below.
                 let mut next_scope = if header.is_some() { None } else { scope };
@@ -388,13 +396,13 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
                     ),
                     Some(path),
                     next_scope,
+                    found,
                 )
             }
-            None => (None, None, line.to_owned(), None, None),
+            None => (None, None, line.to_owned(), None, None, None),
         };
         let needed = 1 + usize::from(rendered.0.is_some()) + usize::from(rendered.1.is_some());
-        // Once a line is left out, so is every later one: nothing is shown out of place.
-        if omitted > 0 || out.len() + needed > options.max_lines {
+        if out.len() + needed > options.max_lines {
             omitted += 1;
             if let Some(path) = rendered.3 {
                 omitted_paths.insert(path.to_owned());
@@ -403,6 +411,7 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
         }
         current = rendered.3;
         scope = rendered.4;
+        matches.extend(rendered.5);
         if let Some(header) = rendered.0 {
             out.push(header);
         }

@@ -950,13 +950,14 @@ async fn execute(cli: Cli) -> Result<()> {
                 if !matches!(program.as_str(), "rg" | "grep") {
                     bail!("--run runs rg or grep only, not {program}");
                 }
-                let output = match std::process::Command::new(program)
+                let child = std::process::Command::new(program)
                     .args(arguments)
                     .stdin(std::process::Stdio::inherit())
+                    .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::inherit())
-                    .output()
-                {
-                    Ok(output) => output,
+                    .spawn();
+                let mut child = match child {
+                    Ok(child) => child,
                     // As the shell reports it: 127 when not found, 126 when not runnable.
                     Err(error) => {
                         let (code, what) = match error.kind() {
@@ -967,14 +968,19 @@ async fn execute(cli: Cli) -> Result<()> {
                         std::process::exit(code);
                     }
                 };
-                input = String::from_utf8_lossy(&output.stdout).into_owned();
+                // At most RUN_OUTPUT_BYTES are kept (compaction shows far less); the rest is
+                // read and dropped so the search never blocks on a full pipe.
+                let mut kept = Vec::new();
+                let mut stdout = child.stdout.take().context("search stdout")?;
+                stdout
+                    .by_ref()
+                    .take(RUN_OUTPUT_BYTES)
+                    .read_to_end(&mut kept)?;
+                io::copy(&mut stdout, &mut io::sink())?;
+                let exit = child.wait()?;
+                input = String::from_utf8_lossy(&kept).into_owned();
                 // A search killed by a signal reports 128 + signal, as the shell would.
-                status = Some(
-                    output
-                        .status
-                        .code()
-                        .unwrap_or_else(|| exit_signal(&output.status)),
-                );
+                status = Some(exit.code().unwrap_or_else(|| exit_signal(&exit)));
             } else {
                 io::stdin().read_to_string(&mut input)?;
             }
@@ -1744,6 +1750,9 @@ fn emit(value: &impl Serialize, _as_json: bool) -> Result<()> {
     println!("{}", render_json(value, io::stdout().is_terminal())?);
     Ok(())
 }
+
+/// Search output kept by `ctx compact --run` before the rest is dropped.
+const RUN_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The shell status of a process killed by a signal: 128 + the signal number.
 #[cfg(unix)]
