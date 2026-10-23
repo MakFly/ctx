@@ -19,6 +19,8 @@ use crate::gitinfo::git_info;
 use crate::model::{Edge, Symbol};
 use crate::parser::parse_source;
 
+const GRAPH_FORMAT: &str = "2";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct IndexResult {
     pub files: usize,
@@ -347,6 +349,7 @@ where
     let paths = report.paths;
     let existing = existing_files(&connection)?;
     let refresh_format = get_meta(&connection, "index_format", "")? != crate::text_index::FORMAT;
+    let refresh_graph = get_meta(&connection, "graph_format", "")? != GRAPH_FORMAT;
     let mut current = paths
         .iter()
         .filter_map(|path| relative_path(path, &root).ok())
@@ -364,6 +367,7 @@ where
             force
                 || touched.iter().any(|changed| path.starts_with(changed))
                 || refresh_format
+                || refresh_graph
                 || existing.get(&relative).is_none_or(|item| {
                     item.size != metadata.len()
                         || (item.mtime - mtime).abs() > 0.000_001
@@ -394,6 +398,7 @@ where
         if let Some(previous) = existing.get(&item.path)
             && previous.digest == item.digest
             && !refresh_format
+            && !refresh_graph
         {
             transaction.execute(
                 "UPDATE files SET size=?1,mtime=?2 WHERE id=?3",
@@ -442,7 +447,7 @@ where
     if changed > 0 || !removed.is_empty() {
         transaction.execute("DELETE FROM edges WHERE source='lsp'", [])?;
     }
-    if changed > 0 || !removed.is_empty() || refresh_format {
+    if changed > 0 || !removed.is_empty() || refresh_format || refresh_graph {
         check_cancelled(stop)?;
         resolve_edges(&transaction)?;
     }
@@ -466,6 +471,7 @@ where
         "text_max_file_bytes",
         &settings.max_file_bytes.to_string(),
     )?;
+    set_meta(&transaction, "graph_format", GRAPH_FORMAT)?;
     let git = git_info(&root);
     set_meta(&transaction, "repo_root", &root.to_string_lossy())?;
     set_meta(
@@ -632,21 +638,38 @@ fn upsert_file(connection: &rusqlite::Connection, item: &PreparedFile) -> Result
         SELECT id,name,COALESCE(qualname,''),COALESCE(snippet,'') FROM symbols WHERE file_id=?1",
         [file_id],
     )?;
-    let mut symbol_ids = HashMap::new();
-    let mut statement = connection.prepare("SELECT id,name FROM symbols WHERE file_id=?1")?;
-    for row in statement.query_map([file_id], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-    })? {
-        let (id, name) = row?;
-        symbol_ids.insert(name, id);
-    }
+    // Attribute each edge to the innermost symbol of that name enclosing its
+    // line, so same-name symbols in one file (A.run, B.run) keep their callers.
+    let mut statement =
+        connection.prepare("SELECT id,name,start,end FROM symbols WHERE file_id=?1")?;
+    let file_symbols = statement
+        .query_map([file_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let source_symbol = |name: &str, line: usize| {
+        let line = line as i64;
+        file_symbols
+            .iter()
+            .filter(|(_, symbol, start, end)| symbol == name && *start <= line && line <= *end)
+            .min_by_key(|(_, _, start, end)| end - start)
+            .map(|(id, ..)| *id)
+    };
     for edge in &item.edges {
         connection.execute(
-            "INSERT INTO edges(src_symbol_id,dst_name,kind,file_id,line)
-             VALUES(?1,?2,?3,?4,?5)",
+            "INSERT INTO edges(src_symbol_id,dst_name,dst_module,kind,file_id,line)
+             VALUES(?1,?2,?3,?4,?5,?6)",
             params![
-                edge.src_name.as_ref().and_then(|name| symbol_ids.get(name)),
+                edge.src_name
+                    .as_deref()
+                    .and_then(|name| source_symbol(name, edge.line)),
                 edge.dst_name,
+                edge.dst_module,
                 edge.kind,
                 file_id,
                 edge.line
@@ -657,8 +680,8 @@ fn upsert_file(connection: &rusqlite::Connection, item: &PreparedFile) -> Result
 }
 
 fn resolve_edges(connection: &rusqlite::Connection) -> Result<()> {
-    // Parser edges resolve only when dst_name is unique in the same file, or
-    // unique in the whole index. Homonyms stay unmatched (dst_symbol_id NULL).
+    // Prefer a same-file definition, then the imported module, then a unique
+    // definition across the index. Ambiguous homonyms stay unbound.
     connection.execute_batch(
         "UPDATE edges SET dst_symbol_id=NULL WHERE source='parser';
          UPDATE edges SET dst_symbol_id=COALESCE(
@@ -666,6 +689,16 @@ fn resolve_edges(connection: &rusqlite::Connection) -> Result<()> {
             WHERE s.name=edges.dst_name AND s.file_id=edges.file_id
               AND (SELECT COUNT(*) FROM symbols same
                    WHERE same.name=edges.dst_name AND same.file_id=edges.file_id)=1),
+           (SELECT s.id FROM symbols s JOIN files f ON f.id=s.file_id
+            WHERE s.name=edges.dst_name AND edges.kind='call'
+              AND edges.dst_module IS NOT NULL
+              AND (f.path GLOB ('*/' || edges.dst_module || '.*')
+                   OR f.path GLOB (edges.dst_module || '.*'))
+              AND (SELECT COUNT(*) FROM symbols candidate
+                   JOIN files candidate_file ON candidate_file.id=candidate.file_id
+                   WHERE candidate.name=edges.dst_name
+                     AND (candidate_file.path GLOB ('*/' || edges.dst_module || '.*')
+                          OR candidate_file.path GLOB (edges.dst_module || '.*')))=1),
            (SELECT s.id FROM symbols s
             WHERE s.name=edges.dst_name
               AND (SELECT COUNT(*) FROM symbols all_names

@@ -18,6 +18,8 @@ pub struct Symbol {
 pub struct Edge {
     pub src_name: Option<String>,
     pub dst_name: String,
+    #[serde(default)]
+    pub dst_module: Option<String>,
     pub kind: String,
     pub line: usize,
 }

@@ -65,9 +65,58 @@ fn graph_query_inner(
         coverage = "partial";
         hint = Some("plusieurs définitions correspondent".to_owned());
     }
+    if operation != "def"
+        && has_unresolved_homonym_edges(&connection, operation, symbol, &definitions)?
+    {
+        coverage = "partial";
+        hint = Some("appels ambigus non résolus dans le graphe statique".to_owned());
+    }
     let mut seen = HashSet::new();
     hits.retain(|hit| seen.insert((hit.path.clone(), hit.start, hit.kind.clone())));
     Ok(apply_budget(hits, budget_tokens, started, coverage, hint))
+}
+
+fn has_unresolved_homonym_edges(
+    connection: &Connection,
+    operation: &str,
+    symbol: &str,
+    definitions: &[Definition],
+) -> Result<bool> {
+    let (sql, values): (String, Vec<rusqlite::types::Value>) =
+        if matches!(operation, "refs" | "callers") {
+            (
+                "SELECT EXISTS(
+               SELECT 1 FROM edges e
+               WHERE e.kind='call' AND e.dst_name=?1 AND e.dst_symbol_id IS NULL
+                 AND (SELECT COUNT(*) FROM symbols s WHERE s.name=e.dst_name)>1
+             )"
+                .to_owned(),
+                vec![symbol.to_owned().into()],
+            )
+        } else {
+            let ids = definitions.iter().map(|item| item.id).collect::<Vec<_>>();
+            if ids.is_empty() {
+                return Ok(false);
+            }
+            let placeholders = (1..=ids.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            (
+                format!(
+                    "SELECT EXISTS(
+                   SELECT 1 FROM edges e
+                   WHERE e.kind='call' AND e.src_symbol_id IN ({placeholders})
+                     AND e.dst_symbol_id IS NULL
+                     AND (SELECT COUNT(*) FROM symbols s WHERE s.name=e.dst_name)>1
+                 )"
+                ),
+                ids.into_iter()
+                    .map(rusqlite::types::Value::Integer)
+                    .collect(),
+            )
+        };
+    Ok(connection.query_row(&sql, params_from_iter(values), |row| row.get(0))?)
 }
 
 fn homonym_definition_hits(definitions: &[Definition]) -> Vec<Hit> {
@@ -158,7 +207,8 @@ fn references(
                     COALESCE(s.end,e.line),COALESCE(s.sig,''),COALESCE(s.snippet,''),COALESCE(s.snippet_truncated,0)
              FROM edges e JOIN files f ON f.id=e.file_id
              LEFT JOIN symbols s ON s.id=e.src_symbol_id
-             WHERE e.dst_symbol_id IN ({placeholders}) OR e.dst_name=?{symbol_parameter}
+             WHERE e.dst_symbol_id IN ({placeholders})
+                OR (e.dst_symbol_id IS NULL AND e.dst_name=?{symbol_parameter})
              ORDER BY (e.source='lsp') DESC,f.is_test,f.path,e.line"
         );
         let mut values = ids

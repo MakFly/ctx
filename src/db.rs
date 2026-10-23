@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 
-pub const SCHEMA_VERSION: &str = "4";
+pub const SCHEMA_VERSION: &str = "5";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS symbols(
 CREATE TABLE IF NOT EXISTS edges(
   id INTEGER PRIMARY KEY, src_symbol_id INTEGER, dst_name TEXT NOT NULL,
   dst_symbol_id INTEGER, kind TEXT, file_id INTEGER, line INTEGER,
-  source TEXT NOT NULL DEFAULT 'parser', confidence REAL NOT NULL DEFAULT 0.65
+  source TEXT NOT NULL DEFAULT 'parser', confidence REAL NOT NULL DEFAULT 0.65,
+  dst_module TEXT
 );
 CREATE TABLE IF NOT EXISTS file_excerpts(
   file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE, excerpt TEXT NOT NULL
@@ -150,6 +151,9 @@ fn migrate(connection: &Connection) -> Result<()> {
             "ALTER TABLE edges ADD COLUMN confidence REAL NOT NULL DEFAULT 0.65",
             [],
         )?;
+    }
+    if !columns.iter().any(|column| column == "dst_module") {
+        connection.execute("ALTER TABLE edges ADD COLUMN dst_module TEXT", [])?;
     }
     Ok(())
 }

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -26,8 +27,16 @@ pub fn parse_source(source: &str, language_name: &str) -> Result<(Vec<Symbol>, V
     );
     dedupe_symbols(&mut symbols);
 
+    let mut imports = HashMap::new();
+    collect_import_bindings(tree.root_node(), source.as_bytes(), &mut imports);
     let mut edges = Vec::new();
-    collect_edges(tree.root_node(), source.as_bytes(), &symbols, &mut edges);
+    collect_edges(
+        tree.root_node(),
+        source.as_bytes(),
+        &symbols,
+        &imports,
+        &mut edges,
+    );
     dedupe_edges(&mut edges);
     Ok((symbols, edges))
 }
@@ -151,7 +160,87 @@ fn collect_symbols(
     }
 }
 
-fn collect_edges(node: Node<'_>, source: &[u8], symbols: &[Symbol], output: &mut Vec<Edge>) {
+fn collect_import_bindings(
+    node: Node<'_>,
+    source: &[u8],
+    bindings: &mut HashMap<String, (String, String)>,
+) {
+    if is_import(node.kind()) {
+        for (local, imported, module) in import_bindings(node_text(node, source)) {
+            bindings.insert(local, (imported, module));
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_import_bindings(child, source, bindings);
+    }
+}
+
+fn import_bindings(raw: &str) -> Vec<(String, String, String)> {
+    let mut result = Vec::new();
+    static PYTHON: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)^\s*from\s+([.\w]+)\s+import\s+(.+?)\s*$").expect("valid regex")
+    });
+    static JAVASCRIPT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(?s)\{([^}]+)\}\s*from\s*['\"]([^'\"]+)['\"]"#).expect("valid regex")
+    });
+    static RUST: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\s*use\s+([\w:]+)::([\w]+)(?:\s+as\s+(\w+))?").expect("valid regex")
+    });
+    let (python, javascript, rust) = (&*PYTHON, &*JAVASCRIPT, &*RUST);
+    if let Some(captures) = python.captures(raw) {
+        let module = module_basename(captures.get(1).unwrap().as_str());
+        for item in captures.get(2).unwrap().as_str().split(',') {
+            let words = item.split_whitespace().collect::<Vec<_>>();
+            if let Some(imported) = words.first() {
+                let local = if words.get(1) == Some(&"as") {
+                    words.get(2).copied().unwrap_or(imported)
+                } else {
+                    imported
+                };
+                result.push((local.to_owned(), (*imported).to_owned(), module.clone()));
+            }
+        }
+    }
+    if let Some(captures) = javascript.captures(raw) {
+        let module = module_basename(captures.get(2).unwrap().as_str());
+        for item in captures.get(1).unwrap().as_str().split(',') {
+            let words = item.split_whitespace().collect::<Vec<_>>();
+            if let Some(imported) = words.first() {
+                let local = if words.get(1) == Some(&"as") {
+                    words.get(2).copied().unwrap_or(imported)
+                } else {
+                    imported
+                };
+                result.push((local.to_owned(), (*imported).to_owned(), module.clone()));
+            }
+        }
+    }
+    if let Some(captures) = rust.captures(raw) {
+        let path = captures.get(1).unwrap().as_str();
+        let imported = captures.get(2).unwrap().as_str();
+        let module = module_basename(path);
+        let local = captures.get(3).map_or(imported, |value| value.as_str());
+        result.push((local.to_owned(), imported.to_owned(), module));
+    }
+    result
+}
+
+fn module_basename(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit(['/', ':', '.'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+        .to_owned()
+}
+
+fn collect_edges(
+    node: Node<'_>,
+    source: &[u8],
+    symbols: &[Symbol],
+    imports: &HashMap<String, (String, String)>,
+    output: &mut Vec<Edge>,
+) {
     let line = node.start_position().row + 1;
     if is_call(node.kind()) {
         let target = node
@@ -166,13 +255,18 @@ fn collect_edges(node: Node<'_>, source: &[u8], symbols: &[Symbol], output: &mut
                     .unwrap_or_default()
                     .to_owned()
             });
-        if let Some(name) = last_identifier(&raw)
-            && !is_keyword(&name)
-            && !is_declaration(symbols, line, &name)
+        if let Some(local_name) = last_identifier(&raw)
+            && !is_keyword(&local_name)
+            && !is_declaration(symbols, line, &local_name)
         {
+            let (name, module) = imports
+                .get(&local_name)
+                .map(|(name, module)| (name.clone(), Some(module.clone())))
+                .unwrap_or((local_name, None));
             output.push(Edge {
                 src_name: owner(symbols, line),
                 dst_name: name,
+                dst_module: module,
                 kind: "call".to_owned(),
                 line,
             });
@@ -201,6 +295,7 @@ fn collect_edges(node: Node<'_>, source: &[u8], symbols: &[Symbol], output: &mut
             output.push(Edge {
                 src_name: owner(symbols, line),
                 dst_name: name,
+                dst_module: None,
                 kind: "import".to_owned(),
                 line,
             });
@@ -208,7 +303,7 @@ fn collect_edges(node: Node<'_>, source: &[u8], symbols: &[Symbol], output: &mut
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_edges(child, source, symbols, output);
+        collect_edges(child, source, symbols, imports, output);
     }
 }
 
@@ -328,6 +423,7 @@ fn dedupe_edges(edges: &mut Vec<Edge>) {
             edge.line,
             edge.src_name.clone(),
             edge.dst_name.clone(),
+            edge.dst_module.clone(),
             edge.kind.clone(),
         ))
     });

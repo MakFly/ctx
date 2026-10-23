@@ -160,6 +160,77 @@ fn search_graph_and_pack_match_acceptance_contract() {
 }
 
 #[test]
+fn graph_resolves_renamed_imports_to_the_imported_homonym() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    for (path, source) in [
+        ("py_target.py", "def foo():\n    return 1\n"),
+        ("py_other.py", "def foo():\n    return 2\n"),
+        (
+            "py_caller.py",
+            "from py_target import foo as bar\ndef caller():\n    return bar()\n",
+        ),
+        ("ts_target.ts", "export function foo() { return 1; }\n"),
+        ("ts_other.ts", "export function foo() { return 2; }\n"),
+        (
+            "ts_caller.ts",
+            "import { foo as bar } from './ts_target';\nexport function caller() { return bar(); }\n",
+        ),
+        ("selected.rs", "pub fn foo() -> i32 { 1 }\n"),
+        ("other.rs", "pub fn foo() -> i32 { 2 }\n"),
+        (
+            "rust_caller.rs",
+            "mod selected;\nmod other;\nuse selected::foo as bar;\nfn caller() -> i32 { bar() }\n",
+        ),
+    ] {
+        fs::write(root.join(path), source).unwrap();
+    }
+    let result = index_repository(root).unwrap();
+    let connection = connect(&result.database, false).unwrap();
+    for (caller, destination) in [
+        ("py_caller.py", "py_target.py"),
+        ("ts_caller.ts", "ts_target.ts"),
+        ("rust_caller.rs", "selected.rs"),
+    ] {
+        let target: String = connection
+            .query_row(
+                "SELECT destination.path FROM edges e
+                 JOIN files caller ON caller.id=e.file_id
+                 JOIN symbols s ON s.id=e.dst_symbol_id
+                 JOIN files destination ON destination.id=s.file_id
+                 WHERE caller.path=?1 AND e.kind='call' AND e.dst_name='foo'",
+                [caller],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(target, destination, "wrong target for {caller}");
+        let callers = graph_query("callers", "foo", 1, 1_500, root).unwrap();
+        assert!(callers.hits.iter().any(|hit| hit.path == caller));
+    }
+}
+
+#[test]
+fn unresolved_homonym_call_is_unbound_and_reports_partial_coverage() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(root.join("a.py"), "def foo():\n    return 1\n").unwrap();
+    fs::write(root.join("b.py"), "def foo():\n    return 2\n").unwrap();
+    fs::write(root.join("caller.py"), "def caller():\n    return foo()\n").unwrap();
+    let result = index_repository(root).unwrap();
+    let connection = connect(&result.database, false).unwrap();
+    let target: Option<i64> = connection
+        .query_row(
+            "SELECT dst_symbol_id FROM edges WHERE file_id=(SELECT id FROM files WHERE path='caller.py') AND dst_name='foo' AND kind='call'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(target, None);
+    let callers = graph_query("callers", "foo", 1, 1_500, root).unwrap();
+    assert_eq!(callers.coverage, "partial");
+}
+
+#[test]
 fn pack_preserves_requested_definitions_before_long_bodies_and_relations() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path();
@@ -261,6 +332,29 @@ fn pack_expand_round_trip_restores_omitted_body() {
     assert!(!restored.snippet_truncated);
     assert!(restored.snippet.contains("ending"));
     assert!(restored.snippet.chars().count() > truncated.sig.chars().count());
+}
+
+#[test]
+fn callers_keep_same_name_methods_of_one_file_apart() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(
+        root.join("jobs.py"),
+        "def foo():\n    return 1\n\ndef bar():\n    return 2\n\nclass A:\n    def run(self):\n        return foo()\n\nclass B:\n    def run(self):\n        return bar()\n",
+    )
+    .unwrap();
+    index_repository(root).unwrap();
+    let callers = |name: &str| {
+        graph_query("callers", name, 1, 50, root)
+            .unwrap()
+            .hits
+            .into_iter()
+            .filter(|hit| hit.symbol.as_deref() == Some("run"))
+            .map(|hit| hit.start)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(callers("foo"), [8]);
+    assert_eq!(callers("bar"), [12]);
 }
 
 #[test]
@@ -468,8 +562,16 @@ fn index_migrates_legacy_edges_before_creating_dependent_indexes() {
     let connection = connect(&result.database, false).unwrap();
     assert_eq!(
         ctx_code::db::get_meta(&connection, "schema_version", "").unwrap(),
-        "4"
+        "5"
     );
+    let has_module_column: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('edges') WHERE name='dst_module')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(has_module_column);
 }
 
 #[test]
