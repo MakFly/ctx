@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, USER_AGENT};
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -294,7 +294,8 @@ fn enrich_inner(
     timeout: Duration,
 ) -> Result<Value> {
     let database = find_ctx(root)?.join("index.sqlite");
-    let connection = connect(&database, true)?;
+    let mut connection = connect(&database, true)?;
+    let expected_indexed_at = get_meta(&connection, "indexed_at", "")?;
     let indexed_root = PathBuf::from(get_meta(&connection, "repo_root", &root.to_string_lossy())?)
         .canonicalize()?;
     let selected = selected_languages(languages)?;
@@ -326,15 +327,16 @@ fn enrich_inner(
             timeout,
         ) {
             Ok((references, queried)) => {
-                let inserted = store_references(&connection, &language, references)?;
+                let (inserted, result) = store_reference_result(
+                    &mut connection,
+                    &language,
+                    references,
+                    &expected_indexed_at,
+                    queried,
+                    &command,
+                )?;
                 total_edges += inserted;
-                results.push(json!({
-                    "language": language,
-                    "status": "enriched",
-                    "symbols": queried,
-                    "edges": inserted,
-                    "command": command,
-                }));
+                results.push(result);
             }
             Err(error) => results.push(json!({
                 "language": language,
@@ -798,16 +800,21 @@ fn language_files(
 }
 
 fn store_references(
-    connection: &Connection,
+    connection: &mut Connection,
     language: &str,
     references: Vec<Reference>,
-) -> Result<usize> {
+    expected_indexed_at: &str,
+) -> Result<Option<usize>> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if get_meta(&transaction, "indexed_at", "")? != expected_indexed_at {
+        return Ok(None);
+    }
     let languages = db_languages(language);
     let placeholders = (1..=languages.len())
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
         .join(",");
-    connection.execute(
+    transaction.execute(
         &format!(
             "DELETE FROM edges WHERE source='lsp'
              AND file_id IN (SELECT id FROM files WHERE lang IN ({placeholders}))"
@@ -817,7 +824,7 @@ fn store_references(
     let mut seen = HashSet::new();
     let mut inserted = 0;
     for reference in references {
-        let file_id: Option<i64> = connection
+        let file_id: Option<i64> = transaction
             .query_row(
                 "SELECT id FROM files WHERE path=?1",
                 [&reference.path],
@@ -827,7 +834,7 @@ fn store_references(
         let Some(file_id) = file_id else {
             continue;
         };
-        let source: Option<i64> = connection
+        let source: Option<i64> = transaction
             .query_row(
                 "SELECT id FROM symbols
                  WHERE file_id=?1 AND start<=?2 AND end>=?2
@@ -839,7 +846,7 @@ fn store_references(
         if !seen.insert((source, reference.dst_name.clone(), file_id, reference.line)) {
             continue;
         }
-        connection.execute(
+        transaction.execute(
             "INSERT INTO edges(src_symbol_id,dst_name,dst_symbol_id,kind,file_id,line,source,confidence)
              VALUES(?1,?2,?3,'ref',?4,?5,'lsp',1.0)",
             params![
@@ -852,7 +859,41 @@ fn store_references(
         )?;
         inserted += 1;
     }
-    Ok(inserted)
+    transaction.commit()?;
+    Ok(Some(inserted))
+}
+
+fn store_reference_result(
+    connection: &mut Connection,
+    language: &str,
+    references: Vec<Reference>,
+    expected_indexed_at: &str,
+    queried: usize,
+    command: &[String],
+) -> Result<(usize, Value)> {
+    match store_references(connection, language, references, expected_indexed_at)? {
+        Some(inserted) => Ok((
+            inserted,
+            json!({
+                "language": language,
+                "status": "enriched",
+                "symbols": queried,
+                "edges": inserted,
+                "command": command,
+            }),
+        )),
+        None => Ok((
+            0,
+            json!({
+                "language": language,
+                "status": "stale_index",
+                "symbols": queried,
+                "edges": 0,
+                "hint": "rerun `ctx lsp enrich` after the index is current",
+                "command": command,
+            }),
+        )),
+    }
 }
 
 fn reference_location(root: &Path, location: &Value) -> Option<(String, usize)> {
@@ -1317,9 +1358,44 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        asset_file_name, asset_url, expected_sha256, reference_location, select_asset,
-        server_request_response, sources, status,
+        Reference, asset_file_name, asset_url, expected_sha256, reference_location, select_asset,
+        server_request_response, sources, status, store_reference_result, store_references,
     };
+
+    fn reference_test_database(directory: &tempfile::TempDir) -> rusqlite::Connection {
+        let database = crate::db::connect(&directory.path().join("index.sqlite"), true).unwrap();
+        crate::db::set_meta(&database, "indexed_at", "published-1").unwrap();
+        database
+            .execute(
+                "INSERT INTO files(id,path,lang) VALUES(1,'src/main.rs','rust')",
+                [],
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO symbols(id,file_id,name,start,end,kind)
+                 VALUES(1,1,'target',1,10,'function')",
+                [],
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO edges(src_symbol_id,dst_name,dst_symbol_id,kind,file_id,line,source,confidence)
+                 VALUES(1,'previous',NULL,'ref',1,1,'lsp',1.0)",
+                [],
+            )
+            .unwrap();
+        database
+    }
+
+    fn test_reference(name: &str) -> Reference {
+        Reference {
+            dst_symbol_id: 1,
+            dst_name: name.to_owned(),
+            path: "src/main.rs".to_owned(),
+            line: 1,
+        }
+    }
 
     #[test]
     fn asset_names_must_be_plain_file_names() {
@@ -1485,5 +1561,63 @@ mod tests {
             "range": {"start": {"line": 0, "character": 0}},
         });
         assert!(reference_location(root.path(), &location).is_none());
+    }
+
+    #[test]
+    fn changed_index_marker_skips_storage_and_reports_stale_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut connection = reference_test_database(&directory);
+        crate::db::set_meta(&connection, "indexed_at", "published-2").unwrap();
+
+        let (inserted, result) = store_reference_result(
+            &mut connection,
+            "rust",
+            vec![test_reference("new")],
+            "published-1",
+            1,
+            &["rust-analyzer".to_owned()],
+        )
+        .unwrap();
+
+        assert_eq!(inserted, 0);
+        assert_eq!(result["status"], "stale_index");
+        let names = connection
+            .prepare("SELECT dst_name FROM edges WHERE source='lsp' ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(names, ["previous"]);
+    }
+
+    #[test]
+    fn failed_insert_rolls_back_the_language_edge_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut connection = reference_test_database(&directory);
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_lsp_insert BEFORE INSERT ON edges
+                 WHEN NEW.dst_name='fail'
+                 BEGIN SELECT RAISE(ABORT,'injected insert failure'); END;",
+            )
+            .unwrap();
+
+        let error = store_references(
+            &mut connection,
+            "rust",
+            vec![test_reference("inserted first"), test_reference("fail")],
+            "published-1",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("injected insert failure"));
+        let names = connection
+            .prepare("SELECT dst_name FROM edges WHERE source='lsp' ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(names, ["previous"]);
     }
 }
