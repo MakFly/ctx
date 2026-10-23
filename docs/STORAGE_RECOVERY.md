@@ -58,9 +58,15 @@ cap a transaction that is still open. Cooperative cancellation does not make
 file parsing, a SQL statement, external sorting or merging interruptible.
 
 Do not introduce intermediate commits without a replacement publication model:
-they would expose graph changes independently of their text generation. A hard
-WAL budget would need an explicit abort policy, including how to report that a
-large repository cannot finish indexing under the configured budget.
+they would expose graph changes independently of their text generation.
+
+The abort policy is a free-space floor, `index.min_free_mb` (default 512 MiB,
+`0` disables), checked on the index disk before the transaction opens, before
+each changed file, before staging and before commit. Below it, indexing fails
+with "indexing aborted: ... below index.min_free_mb", publishes nothing, keeps
+the previous index, and truncates the WAL by checkpoint when no reader holds
+it. This stops ctx from filling the disk; a repository too large for the
+available space still cannot finish and must be narrowed or given more space.
 
 The SQL `content_fts` is an external-content index over `file_contents`, not a
 second copy of the original text. Ranked full-text queries still use it in

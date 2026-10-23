@@ -250,6 +250,53 @@ where
     index_repository_inner(root, force, touched, progress, None)
 }
 
+/// Indexing stopped because the index disk fell below `index.min_free_mb`.
+/// The open transaction and the staged text generation were discarded.
+#[derive(Debug)]
+pub struct DiskFloorReached {
+    pub available_bytes: u64,
+    pub floor_bytes: u64,
+    pub directory: PathBuf,
+}
+
+impl std::fmt::Display for DiskFloorReached {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "indexing aborted: {} MiB free under {}, below index.min_free_mb = {}; \
+             nothing was published. Free disk space, narrow the indexed tree, \
+             or lower index.min_free_mb in .ctx/config.toml",
+            self.available_bytes / (1024 * 1024),
+            self.directory.display(),
+            self.floor_bytes / (1024 * 1024)
+        )
+    }
+}
+
+impl std::error::Error for DiskFloorReached {}
+
+/// The single write transaction (and its WAL) and the staged trigram generation
+/// grow with the changed corpus and cannot be capped while open. Abort before
+/// they exhaust the disk that holds the index directory.
+fn check_disk_floor(directory: &Path, floor_bytes: u64) -> Result<()> {
+    if floor_bytes == 0 {
+        return Ok(());
+    }
+    // An unreadable filesystem statistic must not block indexing.
+    let Ok(available_bytes) = fs2::available_space(directory) else {
+        return Ok(());
+    };
+    if available_bytes < floor_bytes {
+        return Err(DiskFloorReached {
+            available_bytes,
+            floor_bytes,
+            directory: directory.to_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 fn index_repository_inner<F>(
     root: &Path,
     force: bool,
@@ -260,8 +307,35 @@ fn index_repository_inner<F>(
 where
     F: FnMut(IndexProgress),
 {
+    let result = index_repository_publish(root, force, touched, progress, stop);
+    if result
+        .as_ref()
+        .is_err_and(|error| error.is::<DiskFloorReached>())
+    {
+        // The rollback leaves the WAL file at its peak size; hand the space back.
+        let database = ctx_dir(root).join("index.sqlite");
+        if let Ok(connection) = connect(&database, false) {
+            let _ = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+    }
+    result
+}
+
+fn index_repository_publish<F>(
+    root: &Path,
+    force: bool,
+    touched: &HashSet<PathBuf>,
+    progress: &mut F,
+    stop: Option<&AtomicBool>,
+) -> Result<IndexResult>
+where
+    F: FnMut(IndexProgress),
+{
     check_cancelled(stop)?;
-    let database = ctx_dir(root).join("index.sqlite");
+    let index_directory = ctx_dir(root);
+    let settings = index_settings(root)?;
+    check_disk_floor(&index_directory, settings.min_free_bytes)?;
+    let database = index_directory.join("index.sqlite");
     let mut connection = connect(&database, true)?;
     let report = walk_report_inner(root, false, progress, stop)?;
     check_cancelled(stop)?;
@@ -307,6 +381,7 @@ where
     // with corpus size, and the trigram builder later reads this same snapshot.
     for (position, path) in changed_paths.into_iter().enumerate() {
         check_cancelled(stop)?;
+        check_disk_floor(&index_directory, settings.min_free_bytes)?;
         let relative = relative_path(&path, root)?;
         let Some(item) = prepare_file(root, &path)? else {
             current.remove(&relative);
@@ -372,6 +447,7 @@ where
         resolve_edges(&transaction)?;
     }
     check_cancelled(stop)?;
+    check_disk_floor(&index_directory, settings.min_free_bytes)?;
     progress(IndexProgress::Finalizing);
     let staged = crate::text_index::stage_generation_cancellable(
         &transaction,
@@ -388,7 +464,7 @@ where
     set_meta(
         &transaction,
         "text_max_file_bytes",
-        &index_settings(root)?.max_file_bytes.to_string(),
+        &settings.max_file_bytes.to_string(),
     )?;
     let git = git_info(&root);
     set_meta(&transaction, "repo_root", &root.to_string_lossy())?;
@@ -401,6 +477,7 @@ where
     set_meta(&transaction, "index_format", crate::text_index::FORMAT)?;
     // Cancellation rolls back SQL and drops the unpublished generation together.
     check_cancelled(stop)?;
+    check_disk_floor(&index_directory, settings.min_free_bytes)?;
     transaction.commit()?;
     if let Some(staged) = staged {
         staged.commit();

@@ -9,6 +9,8 @@ use toml_edit::DocumentMut;
 pub const MAX_FILE_SIZE: u64 = 1_048_576;
 pub const DEFAULT_TEXT_MAX_FILE_SIZE: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_INDEX_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+/// Free space indexing keeps on the index disk; 0 disables the floor.
+pub const DEFAULT_INDEX_MIN_FREE_BYTES: u64 = 512 * 1024 * 1024;
 pub const EXCERPT_SIZE: usize = 800;
 
 #[derive(Debug, Clone)]
@@ -283,6 +285,7 @@ pub fn relative_path(path: &Path, root: &Path) -> Result<String> {
 pub struct IndexSettings {
     pub max_file_bytes: u64,
     pub buffer_bytes: usize,
+    pub min_free_bytes: u64,
 }
 
 pub fn index_settings(root: &Path) -> Result<IndexSettings> {
@@ -290,6 +293,7 @@ pub fn index_settings(root: &Path) -> Result<IndexSettings> {
     let mut settings = IndexSettings {
         max_file_bytes: DEFAULT_TEXT_MAX_FILE_SIZE,
         buffer_bytes: DEFAULT_INDEX_BUFFER_BYTES,
+        min_free_bytes: DEFAULT_INDEX_MIN_FREE_BYTES,
     };
     if path.is_file() {
         let document = fs::read_to_string(path)?.parse::<DocumentMut>()?;
@@ -313,6 +317,15 @@ pub fn index_settings(root: &Path) -> Result<IndexSettings> {
                 settings.buffer_bytes = usize::try_from(mb)?
                     .checked_mul(1024 * 1024)
                     .context("index buffer size overflow")?;
+            }
+            if let Some(value) = table.get("min_free_mb") {
+                let mb = value
+                    .as_integer()
+                    .filter(|mb| *mb >= 0)
+                    .context("index.min_free_mb must be a non-negative integer")?;
+                settings.min_free_bytes = (mb as u64)
+                    .checked_mul(1024 * 1024)
+                    .context("index.min_free_mb overflow")?;
             }
         }
     }

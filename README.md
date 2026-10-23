@@ -171,12 +171,15 @@ Text files without a supported grammar can still provide search evidence.
 [index]
 max_file_mb = 64
 buffer_mb = 64
+min_free_mb = 512
 ```
 
 Text admission defaults to 64 MiB per file; structural analysis is limited to
 1 MiB. Hidden-file and ignore policies still apply. Coverage concerns admitted
 files, not ignored or oversized content. The buffer setting limits the trigram
-external-sort arena, not total process memory.
+external-sort arena, not total process memory. Indexing stops without
+publishing anything when free space on the index disk falls below
+`min_free_mb`; `0` disables that floor.
 
 ## Optional capabilities
 

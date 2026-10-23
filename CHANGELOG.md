@@ -13,6 +13,13 @@
   the server's own GitHub releases, and assets above 256 MiB. Downloads stream
   to disk and the Python wheel must be a `basedpyright-*.whl`.
 
+### Fixed
+
+- Indexing no longer fills the disk: below `index.min_free_mb` (default
+  512 MiB, `0` disables) free space on the index disk, it aborts without
+  publishing, keeps the previous index and truncates the WAL.
+- MCP server instructions again tell agents to answer from the hits.
+
 ## 0.3.0 - 2026-09-15
 
 ### Added

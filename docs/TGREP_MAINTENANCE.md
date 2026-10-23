@@ -116,6 +116,15 @@ The reference becomes visible only when the transaction commits. Preserve
 rollback cleanup and the previous usable generation. Never overwrite files
 underneath an existing mmap reader.
 
+**Disk floor.** The open transaction (its WAL) and the staged generation cannot
+be capped while open, so indexing checks free space on the effective `CTX_DIR`
+disk before it opens the transaction, before each changed file, before staging
+and before commit. Below `index.min_free_mb` (default 512, `0` disables) it
+returns `indexer::DiskFloorReached`: SQLite rolls back, the staged generation
+is dropped, the previous pair stays published, and `PRAGMA
+wal_checkpoint(TRUNCATE)` hands the WAL space back when no reader blocks it.
+The vendored sorter and merge are not checked mid-operation.
+
 Changed documents become a bounded delta merged with the old disk index. The
 mutable layer is flushed at each coalesced update; it is not exposed ahead of
 the SQLite commit. Unchanged reindexing retains the generation. Shared reader
@@ -205,6 +214,15 @@ changes are needed. Only formatting, offline Cargo metadata and static review
 were authorized for this follow-up; compilation and runtime tests have not run.
 See [the recovery evidence](STORAGE_RECOVERY.md) for measured WAL recovery,
 dependency EOF behavior, remaining limits and the unexecuted regression case.
+
+### Disk floor (2026-10-23)
+
+The abort policy that the storage limits called for is now the free-space floor
+described under "Disk floor" above; it is not a WAL size cap and does not let a
+large repository finish on a small disk. `indexing_aborts_without_publishing_below_the_disk_floor`
+in `tests/acceptance.rs` sets an unsatisfiable floor, checks the typed error,
+that the new file was not published, and that `min_free_mb = 0` resumes. It
+passed with `cargo test --workspace --all-targets --locked` on 2026-10-23.
 
 Non-compiling checks include `git diff --check`, targeted `rustfmt --check`,
 and `cargo metadata --locked --offline --format-version 1`. An offline metadata

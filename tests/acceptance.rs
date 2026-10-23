@@ -264,6 +264,26 @@ fn pack_expand_round_trip_restores_omitted_body() {
 }
 
 #[test]
+fn indexing_aborts_without_publishing_below_the_disk_floor() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    fs::write(root.join("a.py"), "def alpha():\n    return 1\n").unwrap();
+    let first = index_repository(root).unwrap();
+    fs::write(root.join("b.py"), "def beta():\n    return 2\n").unwrap();
+    let config = ctx_dir(root).join("config.toml");
+    // A floor no disk can satisfy: 2^40 MiB.
+    fs::write(&config, "[index]\nmin_free_mb = 1099511627776\n").unwrap();
+    let error = index_repository(root).expect_err("floor must abort indexing");
+    assert!(error.is::<ctx_code::indexer::DiskFloorReached>(), "{error}");
+    assert!(error.to_string().contains("index.min_free_mb"), "{error}");
+    let unchanged = search_index("beta", "symbol", None, 5, 1_500, root).unwrap();
+    assert!(unchanged.hits.iter().all(|hit| hit.path != "b.py"));
+    fs::write(&config, "[index]\nmin_free_mb = 0\n").unwrap();
+    let resumed = index_repository(root).unwrap();
+    assert_eq!(resumed.files, first.files + 1);
+}
+
+#[test]
 fn pack_expand_refuses_paths_outside_the_index() {
     let outside = tempfile::tempdir().unwrap();
     let secret = outside.path().join("secret.txt");
