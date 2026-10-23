@@ -187,6 +187,9 @@ enum Command {
         /// Characters of a match's text kept before it is shortened.
         #[arg(long, default_value_t = 240)]
         max_line_chars: usize,
+        /// Token budget for the bodies of matched definitions (0 disables it).
+        #[arg(long, default_value_t = 1_500)]
+        expand_tokens: usize,
     },
     /// Receive a harness lifecycle event and enqueue background work.
     Hook {
@@ -928,6 +931,7 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::Compact {
             max_lines,
             max_line_chars,
+            expand_tokens,
         } => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input)?;
@@ -938,6 +942,8 @@ async fn execute(cli: Cli) -> Result<()> {
                     ctx_code::compact::CompactOptions {
                         max_lines: max_lines.max(1),
                         max_line_chars: max_line_chars.max(1),
+                        expand_tokens,
+                        root: std::env::current_dir().ok(),
                     }
                 )
             );

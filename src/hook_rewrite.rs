@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 const CAT_MAX_UNREWRITTEN_LINES: usize = 200;
+/// Token budget for the definition bodies appended to a compacted search.
+const EXPAND_TOKENS: usize = 1_500;
 /// Stages a search may be piped through before compaction: they only filter or reorder lines.
 const LINE_FILTERS: &[&str] = &["head", "tail", "sort", "uniq"];
 
@@ -25,19 +27,114 @@ pub fn rewrite_command(command: &str, cwd: &Path) -> Option<String> {
     if directory.is_some() && !effective.is_dir() {
         return None;
     }
+    // A list `a; b && c`: each search in it is compacted, everything else runs as is.
+    let segments = split_list(rest)?;
+    if segments.len() > 1 {
+        let mut changed = false;
+        let mut out = String::new();
+        for (segment, separator) in &segments {
+            match rewrite_search_pipeline(segment) {
+                Some(rewritten) => {
+                    changed = true;
+                    out.push_str(&rewritten);
+                }
+                None => {
+                    // Every segment must still be a form this hook understands.
+                    split_pipeline(segment)?
+                        .into_iter()
+                        .map(tokenize)
+                        .collect::<Option<Vec<_>>>()?;
+                    out.push_str(segment.trim_end());
+                }
+            }
+            out.push_str(separator);
+        }
+        return changed.then(|| format!("{prefix}{out}"));
+    }
     let stages = split_pipeline(rest)?
+        .into_iter()
+        .map(tokenize)
+        .collect::<Option<Vec<_>>>()?;
+    let (first, _) = stages.split_first()?;
+    let (program, arguments) = first.split_first()?;
+    if stages.len() == 1 && program == "cat" {
+        return Some(format!("{prefix}{}", rewrite_cat(arguments, &effective)?));
+    }
+    Some(format!("{prefix}{}", rewrite_search_pipeline(rest)?))
+}
+
+/// `search [| filter]...` followed by ` | ctx compact`, or `None`.
+fn rewrite_search_pipeline(command: &str) -> Option<String> {
+    let stages = split_pipeline(command)?
         .into_iter()
         .map(tokenize)
         .collect::<Option<Vec<_>>>()?;
     let (first, filters) = stages.split_first()?;
     let (program, arguments) = first.split_first()?;
-    if stages.len() == 1 && program == "cat" {
-        return Some(format!("{prefix}{}", rewrite_cat(arguments, &effective)?));
-    }
     if !is_search(program, arguments) || !filters.iter().all(|stage| is_line_filter(stage)) {
         return None;
     }
-    Some(format!("{prefix}{} | ctx compact", rest.trim_end()))
+    Some(format!("{} | ctx compact", command.trim()))
+}
+
+/// Splits a command list on unquoted `;` and `&&`, keeping each separator (with
+/// its spacing) after its segment; `None` on `||`, a lone `&` or an open quote.
+fn split_list(command: &str) -> Option<Vec<(String, String)>> {
+    let bytes = command.as_bytes();
+    let (mut segments, mut start, mut index) = (Vec::new(), 0, 0);
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match (quote, byte) {
+            (Some(open), _) if byte == open => quote = None,
+            (Some(b'"'), b'\\') => index += 1,
+            (Some(_), _) => {}
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'\\') => index += 1,
+            (None, b';') | (None, b'&') => {
+                let width = if byte == b'&' {
+                    if bytes.get(index + 1) != Some(&b'&') {
+                        return None;
+                    }
+                    2
+                } else {
+                    1
+                };
+                let separator_end = index + width;
+                let next = command[separator_end..]
+                    .find(|c: char| c != ' ')
+                    .map_or(command.len(), |offset| separator_end + offset);
+                let segment = command[start..index].trim();
+                if segment.is_empty() {
+                    return None;
+                }
+                let spaced = format!(
+                    "{}{}",
+                    if command[..index].ends_with(' ') {
+                        " "
+                    } else {
+                        ""
+                    },
+                    &command[index..next]
+                );
+                segments.push((segment.to_owned(), spaced));
+                start = next;
+                index = next;
+                continue;
+            }
+            (None, b'|') if bytes.get(index + 1) == Some(&b'|') => return None,
+            _ => {}
+        }
+        index += 1;
+    }
+    if quote.is_some() {
+        return None;
+    }
+    let last = command[start..].trim();
+    if !last.is_empty() {
+        segments.push((last.to_owned(), String::new()));
+    }
+    Some(segments)
 }
 
 /// A search whose output is `path:line:text` lines, with no option that runs another program.
@@ -297,7 +394,19 @@ pub fn post_tool_response(payload: &Value, harness: &str) -> Option<Value> {
         return None;
     }
     let content = response.get("content")?.as_str()?;
-    let compacted = crate::compact::compact(content, crate::compact::CompactOptions::default());
+    let root = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    let compacted = crate::compact::compact(
+        content,
+        crate::compact::CompactOptions {
+            expand_tokens: EXPAND_TOKENS,
+            root,
+            ..crate::compact::CompactOptions::default()
+        },
+    );
     let compacted = compacted.trim_end_matches('\n');
     if compacted.len() >= content.len() {
         return None;
@@ -360,8 +469,7 @@ mod tests {
             "rg foo | head -5 out.txt",
             "rg foo | xargs rm",
             "rg foo || true",
-            "rg foo && ls",
-            "rg foo; ls",
+            "rg foo && rm -rf x | tee y > z",
             "rg $(echo foo)",
             "rg 'unterminated",
             "rg foo | ctx compact",
@@ -373,6 +481,24 @@ mod tests {
             assert!(rewrite_command(command, cwd).is_none(), "{command:?}");
         }
         assert!(rewrite_command("cd missing && rg foo", cwd).is_none());
+    }
+
+    #[test]
+    fn each_search_in_a_command_list_is_compacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        assert_eq!(
+            rewrite_command("sed -n '1,20p' a.rs; rg -n foo src", cwd).unwrap(),
+            "sed -n '1,20p' a.rs; rg -n foo src | ctx compact"
+        );
+        assert_eq!(
+            rewrite_command("rg -n a && rg -n b | head -5", cwd).unwrap(),
+            "rg -n a | ctx compact && rg -n b | head -5 | ctx compact"
+        );
+        assert!(rewrite_command("sed -n '1,2p' a; ls", cwd).is_none());
+        assert!(rewrite_command("rg a; rm x > y", cwd).is_none());
+        assert!(rewrite_command("rg a & rg b", cwd).is_none());
+        assert!(rewrite_command("rg a || rg b", cwd).is_none());
     }
 
     #[test]

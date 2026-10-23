@@ -3,13 +3,19 @@
 //! line's number and text, shortens very long lines and bounds the total, saying
 //! what it left out. Lines it does not recognise pass through unchanged.
 
+use std::path::{Path, PathBuf};
+
 /// Limits applied by `compact`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CompactOptions {
     /// Output lines kept before the rest is summarised.
     pub max_lines: usize,
     /// Characters of a match's text kept before it is shortened.
     pub max_line_chars: usize,
+    /// Token budget for the bodies of the definitions the search found (0: none).
+    pub expand_tokens: usize,
+    /// Directory the search paths are relative to; no expansion without it.
+    pub root: Option<PathBuf>,
 }
 
 impl Default for CompactOptions {
@@ -17,7 +23,86 @@ impl Default for CompactOptions {
         Self {
             max_lines: 250,
             max_line_chars: 240,
+            expand_tokens: 0,
+            root: None,
         }
+    }
+}
+
+/// Largest single definition body shown in full, in tokens.
+const MAX_BODY_TOKENS: usize = 700;
+
+fn estimate_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(4)
+}
+
+/// The bodies of the definitions whose first lines the search matched (a search for
+/// a function usually precedes reading it), exact and numbered, within the budget.
+fn expand_definitions(matches: &[(String, usize, String)], root: &Path, budget: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    let mut seen = std::collections::HashSet::new();
+    let mut parsed: std::collections::HashMap<
+        String,
+        Option<(Vec<String>, Vec<crate::model::Symbol>)>,
+    > = std::collections::HashMap::new();
+    for (path, line, text) in matches {
+        let entry = parsed.entry(path.clone()).or_insert_with(|| {
+            let full = root.join(path);
+            let lang = crate::config::language(&full)?;
+            let source = std::fs::read_to_string(&full).ok()?;
+            let (symbols, _) = crate::parser::parse_source(&source, lang).ok()?;
+            Some((source.lines().map(str::to_owned).collect(), symbols))
+        });
+        let Some((lines, symbols)) = entry else {
+            continue;
+        };
+        // The definition that starts on the matched line (or just above it, for a
+        // signature spread over a decorator or an export line).
+        let Some(symbol) = symbols
+            .iter()
+            .filter(|symbol| matches!(symbol.kind.as_str(), "function" | "method"))
+            .filter(|symbol| symbol.start <= *line && *line <= symbol.start + 2)
+            // The matched line must be the definition itself, not a call just below it.
+            .filter(|symbol| {
+                text.contains(symbol.name.as_str())
+                    && !text.trim_start().starts_with(&format!("{}(", symbol.name))
+            })
+            .min_by_key(|symbol| symbol.end - symbol.start)
+        else {
+            continue;
+        };
+        if !seen.insert((path.clone(), symbol.start)) {
+            continue;
+        }
+        let end = symbol.end.min(lines.len());
+        let mut block = format!(
+            "## {path} {}-{end} {} {}\n",
+            symbol.start, symbol.kind, symbol.qualname
+        );
+        let mut cut = None;
+        for number in symbol.start..=end {
+            let text = format!("{number}\t{}\n", lines[number - 1]);
+            if estimate_tokens(&block) + estimate_tokens(&text) > MAX_BODY_TOKENS {
+                cut = Some(number);
+                break;
+            }
+            block.push_str(&text);
+        }
+        if let Some(from) = cut {
+            block.push_str(&format!("... {from}-{end} elided\n"));
+        }
+        let cost = estimate_tokens(&block);
+        if used + cost > budget {
+            break;
+        }
+        used += cost;
+        out.push_str(&block);
+    }
+    if out.is_empty() {
+        out
+    } else {
+        format!("definitions found:\n{out}")
     }
 }
 
@@ -69,6 +154,7 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
     let mut out = Vec::new();
     let mut current: Option<&str> = None;
     let (mut omitted, mut omitted_paths) = (0usize, std::collections::BTreeSet::new());
+    let mut matches = Vec::new();
     for line in input.lines() {
         // `--` only separates context groups; the line numbers already show the gaps.
         if line == "--" {
@@ -76,6 +162,11 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
         }
         let rendered = match parse(line) {
             Some((path, number, separator, text)) => {
+                if separator == ':'
+                    && let Ok(number) = number.parse::<usize>()
+                {
+                    matches.push((path.to_owned(), number, text.to_owned()));
+                }
                 let header = (current != Some(path)).then(|| path.to_owned());
                 current = Some(path);
                 (
@@ -117,6 +208,11 @@ pub fn compact(input: &str, options: CompactOptions) -> String {
     }
     if !text.is_empty() {
         text.push('\n');
+    }
+    if options.expand_tokens > 0
+        && let Some(root) = &options.root
+    {
+        text.push_str(&expand_definitions(&matches, root, options.expand_tokens));
     }
     text
 }
@@ -168,6 +264,7 @@ mod tests {
             CompactOptions {
                 max_lines: 10,
                 max_line_chars: 100,
+                ..CompactOptions::default()
             },
         );
         assert!(
@@ -184,6 +281,7 @@ mod tests {
             CompactOptions {
                 max_lines: 10,
                 max_line_chars: 100,
+                ..CompactOptions::default()
             },
         );
         assert!(out.lines().count() <= 11, "{out}");
@@ -191,6 +289,33 @@ mod tests {
             out.trim_end().ends_with("not shown; narrow the search"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn the_body_of_a_matched_definition_is_appended_within_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.py"),
+            "import os\n\ndef target(a):\n    b = a + 1\n    return b\n\ndef other():\n    target(2)\n",
+        )
+        .unwrap();
+        let input = "a.py:3:def target(a):\na.py:8:    target(2)\n";
+        let options = CompactOptions {
+            expand_tokens: 500,
+            root: Some(dir.path().to_path_buf()),
+            ..CompactOptions::default()
+        };
+        let out = compact(input, options.clone());
+        assert!(out.contains("definitions found:\n## a.py 3-5 function target\n3\tdef target(a):\n4\t    b = a + 1\n5\t    return b\n"), "{out}");
+        assert!(!out.contains("function other"), "{out}");
+        let none = compact(
+            input,
+            CompactOptions {
+                expand_tokens: 0,
+                ..options
+            },
+        );
+        assert!(!none.contains("definitions found"), "{none}");
     }
 
     #[test]
