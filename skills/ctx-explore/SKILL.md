@@ -44,7 +44,12 @@ expose search, graph, and file tools. Use the supported arguments, with CLI
 Start with an exact symbol when one is known, or a focused subsystem question.
 Use an existing briefing only when it is relevant and current. A pack may
 contain signatures and relationships rather than complete function bodies.
-Expand the cited span when the requested fact requires the body.
+Expand the cited span when the requested fact requires the body: from the
+CLI, `ctx read <file> --symbol NAME` prints one full definition and
+`ctx read <file> --lines A:B` an exact range, cheaper than reading the file.
+Every output stays in the context for the rest of the session, so read the
+range you need rather than the whole file, and stop searching once the
+evidence answers the question.
 
 Answer when the evidence is sufficient. For a missing fact, use a relevant
 expansion hint or a narrower query; do not repeat an empty or unchanged hint

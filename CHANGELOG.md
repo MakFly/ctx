@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Added
+
+- Text output for `ctx search`, `ctx graph` and `ctx pack` now groups hits by
+  file, prints compact source evidence and reports the printed-token estimate.
+  JSON output is compact when stdout is piped and remains pretty in a terminal.
+- `ctx read <file>` reads a line range (`--lines A:B`, `--raw` byte-exact),
+  one definition (`--symbol NAME`) or an outline of the file's definitions
+  (`--outline`) within a token budget, and names what it elided. No index
+  needed.
+- `ctx metrics import-bench` records paired benchmark rows as measured
+  savings.
+
+### Changed
+
+- `ctx gain` no longer presents an estimate as a saving: estimates show as
+  context avoided against whole cited files, without a percentage or the
+  efficiency meter, and measured pairs are reported apart, negative included.
+
 ### Security
 
 - `ctx_pack` expansion (`expand <path>:<start>-<end>`) now accepts only indexed
@@ -39,7 +57,7 @@
 
 ### Added
 
-- RTK-style global and project metrics dashboards with ANSI terminal colors.
+- Global and project metrics dashboards with ANSI terminal colors.
 - Per-operation counts, context tokens, duration, efficiency and savings.
 - Exact no-ctx baseline pairing for `ctx run` measurements.
 - Estimated MCP savings based on cited source files.

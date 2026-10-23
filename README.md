@@ -30,7 +30,16 @@ ctx search 'solve_dependencies' --mode literal --json
 ctx search 'def (login|logout)' --mode regex --json
 ctx graph --op callers --symbol login --json
 ctx pack 'where is authentication handled?' --json
+ctx read src/auth.py --symbol login
+ctx read src/auth.py --lines 40:80
 ```
+
+`ctx read` prints exactly what it is asked for: a line range (`--raw` is
+byte-identical to the file), the full body of one definition (`--symbol`),
+or the file's definitions with their line ranges (`--outline`). Without a
+flag it prints the whole file when it fits its token budget (`--budget-tokens`,
+default 2000) and the outline otherwise, naming the elided ranges so an agent
+knows what to ask next. It parses the file itself and needs no index.
 
 Artifacts live under `.ctx/`. Set `CTX_DIR` to use another index directory.
 Git is optional and enables Git-aware freshness information.
@@ -56,6 +65,15 @@ Exact searches return merged matches with two lines of surrounding context.
 Use `--ignore-case` with literal or regex mode for Unicode case folding. Regexes
 support inline flags, including multiline and dot-all; lookarounds and
 backreferences are unsupported. Ranked queries are not interpreted as regexes.
+
+Text output groups evidence by file and prints numbered source lines:
+
+```text
+src/auth.py
+42: def login(user):
+43:     return users.find(user)
+1 hits in 1 files; ~17 tokens printed; coverage=complete
+```
 
 ```console
 ctx search 'Vec<T>' --mode literal --budget-tokens 1500 --json
@@ -245,6 +263,16 @@ the returned evidence. The dashboard labels these estimates explicitly:
 they do not measure a reduction in provider usage or billing.
 Totals combining paired measurements and estimates are labeled `mixed`,
 including the JSON report's `savings_confidence` field.
+An estimate is never shown as a saving: it appears as context avoided against
+whole cited files, with no percentage and no efficiency meter. Measured pairs
+are shown on their own line, negative values included when ctx cost more.
+Import paired benchmark rows (JSON lines with `h`, `arm`, `q`, `rep`, `ok`,
+`warm` and the token fields) as measured pairs; re-importing a file does not
+count it twice:
+
+~~~console
+ctx metrics import-bench results.jsonl --arm ctx --base base
+~~~
 Configure model pricing when needed:
 
 ~~~console
