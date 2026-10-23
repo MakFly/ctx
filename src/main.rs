@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -178,6 +178,24 @@ enum Command {
         raw: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Compact search output read from stdin: each path once, long lines shortened, bounded.
+    Compact {
+        /// Output lines kept before the rest is summarised.
+        #[arg(long, default_value_t = 250)]
+        max_lines: usize,
+        /// Characters of a match's text kept before it is shortened.
+        #[arg(long, default_value_t = 240)]
+        max_line_chars: usize,
+        /// Token budget for matched definition bodies and the lines around other matches (0 disables it).
+        #[arg(long, default_value_t = 600)]
+        expand_tokens: usize,
+        /// Run this search and compact its output, exiting with its status.
+        #[arg(long, requires = "search")]
+        run: bool,
+        /// The search to run with `--run`.
+        #[arg(last = true, id = "search")]
+        search: Vec<String>,
     },
     /// Receive a harness lifecycle event and enqueue background work.
     Hook {
@@ -377,6 +395,22 @@ enum HookCommand {
         harness: String,
         #[arg(long)]
         model: Option<String>,
+    },
+    /// Make a shell command cheaper to read without changing it (PreToolUse hook).
+    Rewrite {
+        #[arg(long)]
+        harness: String,
+        /// Token budget for the source appended to each rewritten search.
+        #[arg(long)]
+        expand_tokens: Option<usize>,
+    },
+    /// Compact a tool's search output in place (PostToolUse hook, Claude Grep).
+    CompactOutput {
+        #[arg(long)]
+        harness: String,
+        /// Token budget for the source appended to the compacted result.
+        #[arg(long)]
+        expand_tokens: Option<usize>,
     },
 }
 
@@ -906,6 +940,51 @@ async fn execute(cli: Cli) -> Result<()> {
             },
             json,
         ),
+        Command::Compact {
+            max_lines,
+            max_line_chars,
+            expand_tokens,
+            run,
+            search,
+        } => {
+            let options = ctx_code::compact::CompactOptions {
+                max_lines: max_lines.max(1),
+                max_line_chars: max_line_chars.max(1),
+                expand_tokens,
+                root: std::env::current_dir().ok(),
+                // Stdin: the search is unknown, so a `--` line may be a separator and
+                // output ending in a NUL may be a file list.
+                context_separators: true,
+                null_lists: true,
+            };
+            if !run {
+                let mut input = String::new();
+                io::stdin().read_to_string(&mut input)?;
+                print!("{}", ctx_code::compact::compact(&input, options));
+                return Ok(());
+            }
+            // A search runner, not a process runner: known-safe rg/grep searches and plain
+            // reads only, each started from PATH without a shell.
+            let steps = ctx_code::hook_rewrite::parse_run(&search).with_context(|| {
+                "--run runs rg or grep only, with plain reads (sed -n, cat, nl, head, tail, wc) joined by --and or --then"
+            })?;
+            let mut last = 0;
+            for (after_and, step) in steps {
+                // `a && b`: b runs only after a succeeded; `a; b` runs b anyway.
+                if after_and && last != 0 {
+                    continue;
+                }
+                io::stdout().flush()?;
+                last = match step {
+                    ctx_code::hook_rewrite::RunStep::Search(words) => {
+                        run_search(&words, options.clone())?
+                    }
+                    ctx_code::hook_rewrite::RunStep::Read(words) => run_read(&words)?,
+                };
+            }
+            io::stdout().flush()?;
+            std::process::exit(last);
+        }
         Command::Hook { command } => execute_hook(command),
         Command::Embeddings { command } => execute_embeddings(command),
         Command::Lsp { command } => execute_lsp(command).await,
@@ -1434,6 +1513,45 @@ fn execute_hook(command: HookCommand) -> Result<()> {
             ctx_code::reindex::request_async(&root, false)?;
             Ok(())
         }
+        HookCommand::Rewrite {
+            harness,
+            expand_tokens,
+        } => {
+            // A PreToolUse hook never blocks: unreadable or unsupported input prints nothing.
+            let mut body = String::new();
+            let response = io::stdin()
+                .read_to_string(&mut body)
+                .ok()
+                .and_then(|_| serde_json::from_str::<Value>(&body).ok())
+                .and_then(|payload| {
+                    ctx_code::hook_rewrite::hook_response_with(&payload, &harness, expand_tokens)
+                });
+            if let Some(response) = response {
+                println!("{response}");
+            }
+            Ok(())
+        }
+        HookCommand::CompactOutput {
+            harness,
+            expand_tokens,
+        } => {
+            let mut body = String::new();
+            let response = io::stdin()
+                .read_to_string(&mut body)
+                .ok()
+                .and_then(|_| serde_json::from_str::<Value>(&body).ok())
+                .and_then(|payload| {
+                    ctx_code::hook_rewrite::post_tool_response_with(
+                        &payload,
+                        &harness,
+                        expand_tokens,
+                    )
+                });
+            if let Some(response) = response {
+                println!("{response}");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1628,4 +1746,130 @@ fn emit_envelope(
 fn emit(value: &impl Serialize, _as_json: bool) -> Result<()> {
     println!("{}", render_json(value, io::stdout().is_terminal())?);
     Ok(())
+}
+
+/// Starts one `--run` step from PATH, or reports its shell status (127 not found,
+/// 126 not runnable) when it cannot start.
+fn spawn_step(
+    words: &[String],
+    stdout: std::process::Stdio,
+) -> Result<std::result::Result<std::process::Child, i32>> {
+    let (program, arguments) = words.split_first().context("empty --run step")?;
+    match std::process::Command::new(program)
+        .args(arguments)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(stdout)
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => Ok(Ok(child)),
+        Err(error) => {
+            let (code, what) = match error.kind() {
+                io::ErrorKind::NotFound => (127, "command not found"),
+                _ => (126, "cannot execute"),
+            };
+            eprintln!("ctx: {program}: {what}");
+            Ok(Err(code))
+        }
+    }
+}
+
+/// The shell status of a finished step: its code, or 128 + the signal that killed it.
+fn step_status(exit: std::process::ExitStatus) -> i32 {
+    exit.code().unwrap_or_else(|| exit_signal(&exit))
+}
+
+/// Runs one search and prints its compacted output; returns its status.
+fn run_search(words: &[String], options: ctx_code::compact::CompactOptions) -> Result<i32> {
+    // Output ctx compact does not read (file names, counts, no path per line, forced
+    // colour) goes straight to our stdout, byte for byte and unbounded.
+    let Some((normalized, added_null)) = ctx_code::hook_rewrite::normalize_search(words) else {
+        return run_read(words);
+    };
+    let mut options = options;
+    options.context_separators = ctx_code::hook_rewrite::uses_context(words);
+    options.null_lists = false;
+    let words = normalized;
+    let mut child = match spawn_step(&words, std::process::Stdio::piped())? {
+        Ok(child) => child,
+        Err(code) => return Ok(code),
+    };
+    // Output that fits RUN_OUTPUT_BYTES and is UTF-8 is compacted. Anything else (more
+    // than that, or a name or a line in another encoding) goes out whole, line by line,
+    // as the search printed it without `--null`: nothing is cut, dropped or decoded.
+    let mut kept = Vec::new();
+    let mut stdout = child.stdout.take().context("search stdout")?;
+    stdout
+        .by_ref()
+        .take(RUN_OUTPUT_BYTES + 1)
+        .read_to_end(&mut kept)?;
+    let compactable = if kept.len() as u64 <= RUN_OUTPUT_BYTES {
+        String::from_utf8(kept).map_err(|error| error.into_bytes())
+    } else {
+        Err(kept)
+    };
+    match compactable {
+        Ok(text) => {
+            let exit = child.wait()?;
+            print!("{}", ctx_code::compact::compact(&text, options));
+            Ok(step_status(exit))
+        }
+        Err(kept) => {
+            let mut lines = io::BufReader::new(io::Cursor::new(kept).chain(stdout));
+            let mut out = io::stdout().lock();
+            let mut line = Vec::new();
+            while lines.read_until(b'\n', &mut line)? > 0 {
+                if added_null {
+                    out.write_all(&without_added_nul(&line))?;
+                } else {
+                    out.write_all(&line)?;
+                }
+                line.clear();
+            }
+            drop(out);
+            Ok(step_status(child.wait()?))
+        }
+    }
+}
+
+/// Runs one plain read (or a file listing) with its output straight to ours; returns
+/// its status.
+fn run_read(words: &[String]) -> Result<i32> {
+    match spawn_step(words, std::process::Stdio::inherit())? {
+        Ok(mut child) => Ok(step_status(child.wait()?)),
+        Err(code) => Ok(code),
+    }
+}
+
+/// One `--null` output line as the search prints it without `--null`: only the first
+/// NUL, the one after the path, becomes the `:` of a match line or the `-` of a context
+/// line (by what follows the number); a NUL in the matched text stays.
+fn without_added_nul(line: &[u8]) -> Vec<u8> {
+    let mut out = line.to_vec();
+    if let Some(at) = line.iter().position(|byte| *byte == 0) {
+        let digits = line[at + 1..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        out[at] = match line.get(at + 1 + digits) {
+            Some(b'-') if digits > 0 => b'-',
+            _ => b':',
+        };
+    }
+    out
+}
+
+/// Largest search output `ctx compact --run` compacts; a longer one goes out whole.
+const RUN_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The shell status of a process killed by a signal: 128 + the signal number.
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    128 + status.signal().unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> i32 {
+    1
 }

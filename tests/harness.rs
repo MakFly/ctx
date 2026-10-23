@@ -256,6 +256,16 @@ fn installation_is_complete_idempotent_and_preserves_configuration() {
             .unwrap()
             .contains("ctx hook after-turn")
     );
+    // The search hooks: shell searches rewritten, Grep results compacted.
+    assert_eq!(claude_settings["hooks"]["PreToolUse"][0]["matcher"], "Bash");
+    assert_eq!(
+        claude_settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        "ctx hook rewrite --harness claude"
+    );
+    assert_eq!(
+        claude_settings["hooks"]["PostToolUse"][0]["matcher"],
+        "Grep"
+    );
     assert_eq!(cursor["keep"], true);
     assert_eq!(cursor_hooks["version"], 1);
     assert!(

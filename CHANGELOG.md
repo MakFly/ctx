@@ -13,6 +13,16 @@
   needed.
 - `ctx metrics import-bench` records paired benchmark rows as measured
   savings.
+- `ctx compact` groups `path:line:text` search output by file, names the
+  function holding each group of matches, and appends the source the search
+  points at (matched definitions, then the lines around the densest groups)
+  within a token budget. `ctx compact --run -- ...` runs a `--and`/`--then`
+  list of known-safe `rg`/`grep` searches and plain reads itself, from PATH and
+  without a shell, and exits with the shell's status for it.
+- `ctx hook rewrite` (PreToolUse, Claude and Codex) turns an agent's search and
+  plain-read lists into `ctx compact --run`; `ctx hook compact-output`
+  (PostToolUse, Claude Grep) compacts Grep content results in place.
+  `ctx install --target claude` adds both hooks.
 
 ### Changed
 

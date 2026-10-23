@@ -781,3 +781,403 @@ fn read_raw_lines_match_the_file_and_outline_lists_definitions() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("  5-7 def login("), "{text}");
 }
+
+#[test]
+fn compact_run_keeps_the_search_status_and_compacts_its_output() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    let found = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args([
+            "compact", "--run", "--", "grep", "-H", "-n", "beta", "a.txt",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(found.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&found.stdout).starts_with("a.txt\n2:beta\n"));
+    // No match: grep's own status 1, not compact's success.
+    let missing = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args([
+            "compact", "--run", "--", "grep", "-H", "-n", "gamma", "a.txt",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+    // `-q` prints nothing yet succeeds: the status still follows the search.
+    let quiet = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-q", "beta", "a.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(quiet.status.code(), Some(0));
+}
+
+/// A directory holding one fake search tool named `name`, for a controlled PATH.
+#[cfg(unix)]
+fn fake_tool(name: &str, script: Option<&str>) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(name);
+    fs::write(&path, script.unwrap_or("not a program")).unwrap();
+    let mode = if script.is_some() { 0o755 } else { 0o644 };
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+    directory
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_run_reports_spawn_failures_and_signals_as_the_shell_does() {
+    let run = |path: &Path| {
+        Command::cargo_bin("ctx")
+            .unwrap()
+            .env("PATH", path)
+            .args(["compact", "--run", "--", "rg", "foo"])
+            .output()
+            .unwrap()
+            .status
+            .code()
+    };
+    let empty = tempfile::tempdir().unwrap();
+    assert_eq!(run(empty.path()), Some(127));
+    let unrunnable = fake_tool("rg", None);
+    assert_eq!(run(unrunnable.path()), Some(126));
+    let killed = fake_tool("rg", Some("#!/bin/sh\nkill -TERM $$\n"));
+    assert_eq!(run(killed.path()), Some(143));
+}
+
+#[test]
+fn compact_run_runs_rg_or_grep_only() {
+    for program in ["sh", "/usr/bin/grep", "./rg"] {
+        let output = Command::cargo_bin("ctx")
+            .unwrap()
+            .args(["compact", "--run", "--", program, "-c", "true"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{program}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("rg or grep only"));
+    }
+}
+
+#[test]
+fn hook_rewrite_leaves_rg_alone_when_an_rg_config_file_is_set() {
+    let payload = r#"{"tool_name":"Bash","cwd":"/","tool_input":{"command":"rg foo"}}"#;
+    let configured = Command::cargo_bin("ctx")
+        .unwrap()
+        .env("RIPGREP_CONFIG_PATH", "/tmp/some-rgrc")
+        .args(["hook", "rewrite", "--harness", "codex"])
+        .write_stdin(payload)
+        .output()
+        .unwrap();
+    assert!(configured.stdout.is_empty());
+    // Spelled any way the shell decodes to `rg`, for either harness.
+    for command in [r"r\g foo", "'r'g foo", "\"rg\" foo"] {
+        for harness in ["codex", "claude"] {
+            let body = serde_json::json!({
+                "tool_name": "Bash", "cwd": "/", "tool_input": {"command": command}
+            })
+            .to_string();
+            let spelled = Command::cargo_bin("ctx")
+                .unwrap()
+                .env("RIPGREP_CONFIG_PATH", "/tmp/some-rgrc")
+                .args(["hook", "rewrite", "--harness", harness])
+                .write_stdin(body)
+                .output()
+                .unwrap();
+            assert!(spelled.stdout.is_empty(), "{harness} {command}");
+        }
+    }
+    let plain = Command::cargo_bin("ctx")
+        .unwrap()
+        .env_remove("RIPGREP_CONFIG_PATH")
+        .args(["hook", "rewrite", "--harness", "codex"])
+        .write_stdin(payload)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&plain.stdout).contains("ctx compact --run -- rg foo"));
+}
+
+#[test]
+fn compact_run_runs_a_list_like_the_shell_keeping_and_and_then() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+    let run = |words: &[&str]| {
+        Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(temporary.path())
+            .args(["compact", "--run", "--"])
+            .args(words)
+            .output()
+            .unwrap()
+    };
+    // The read prints as is, the search compacted, in order.
+    let both = run(&[
+        "sed", "-n", "1p", "a.txt", "--then", "grep", "-H", "-n", "beta", "a.txt",
+    ]);
+    assert_eq!(both.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&both.stdout).starts_with("alpha\na.txt\n2:beta\n"));
+    // A failed search stops an `--and` chain, and its status is the list's.
+    let stopped = run(&["grep", "-q", "gamma", "a.txt", "--and", "cat", "a.txt"]);
+    assert_eq!(stopped.status.code(), Some(1));
+    assert!(stopped.stdout.is_empty());
+    // `--then` runs the next step anyway; the last step's status wins.
+    let then = run(&["grep", "-q", "gamma", "a.txt", "--then", "cat", "a.txt"]);
+    assert_eq!(then.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&then.stdout), "alpha\nbeta\n");
+}
+
+#[test]
+fn compact_run_keeps_file_names_holding_delimiters_apart() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a"), "nothing\n").unwrap();
+    fs::write(temporary.path().join("a:1:b.rs"), "x\nmatch here\n").unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "match", "a:1:b.rs", "a"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("a:1:b.rs\n2:match here\n"),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn compact_run_runs_a_quiet_rg_as_written() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a.txt"), "alpha\n").unwrap();
+    let run = |pattern: &str| {
+        Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(temporary.path())
+            .args(["compact", "--run", "--", "rg", "-q", pattern, "a.txt"])
+            .output()
+            .unwrap()
+    };
+    let found = run("alpha");
+    assert_eq!(found.status.code(), Some(0));
+    assert!(found.stdout.is_empty());
+    assert_eq!(run("gamma").status.code(), Some(1));
+}
+
+#[test]
+fn compact_run_prints_file_lists_as_the_search_wrote_them() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("--"), "x\n").unwrap();
+    fs::write(temporary.path().join("a:1:foo"), "x\n").unwrap();
+    // With no path and a piped stdin rg would search stdin: name the directory.
+    for listing in [
+        &["--files", "."][..],
+        &["-l", "x", "."][..],
+        &["-l", "--null", "x", "."][..],
+    ] {
+        let output = Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(temporary.path())
+            .args(["compact", "--run", "--", "rg", "--sort", "path"])
+            .args(listing)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).replace('\0', "\n");
+        let mut names: Vec<_> = text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.trim_start_matches("./"))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["--", "a:1:foo"], "{listing:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_run_passes_a_file_list_through_byte_for_byte() {
+    use std::os::unix::ffi::OsStrExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+    fs::write(temporary.path().join(name), "x\n").unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "rg", "--files", "."])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"./caf\xe9.txt\n");
+}
+
+#[test]
+fn compact_run_prints_counts_as_the_search_wrote_them() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a:1:b.rs"), "x\nx\n").unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-c", "x", "a:1:b.rs"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"2\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_run_passes_non_utf8_content_through_byte_for_byte() {
+    use std::os::unix::ffi::OsStrExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+    fs::write(temporary.path().join(name), "needle\n").unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-r", "needle", "."])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    // The NUL ctx added after the path reads as grep's own `:`.
+    assert_eq!(output.stdout, b"./caf\xe9.txt:1:needle\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_run_keeps_a_nul_inside_non_utf8_matched_text() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a.txt"), b"needle\xff\0payload\n").unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-a", "-r", "needle", "."])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    // Only the NUL ctx added after the path is read back as `:`.
+    assert_eq!(output.stdout, b"./a.txt:1:needle\xff\0payload\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_run_passes_all_non_utf8_output_past_the_buffer_cap() {
+    let temporary = tempfile::tempdir().unwrap();
+    let lines = 1_200_000;
+    fs::write(
+        temporary.path().join("a.txt"),
+        b"needle\xff\n".repeat(lines),
+    )
+    .unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-a", "-r", "needle", "."])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.len() > 16 * 1024 * 1024);
+    assert_eq!(
+        output.stdout.iter().filter(|byte| **byte == b'\n').count(),
+        lines
+    );
+    let last = [b"./a.txt:", lines.to_string().as_bytes(), b":needle\xff\n"].concat();
+    assert!(output.stdout.ends_with(&last));
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_run_streams_output_past_the_cap_whole_even_if_late_bytes_are_not_utf8() {
+    let temporary = tempfile::tempdir().unwrap();
+    let lines = 1_000_000;
+    let mut body = b"needle\n".repeat(lines);
+    body.extend_from_slice(b"needle\xff\n");
+    fs::write(temporary.path().join("a.txt"), body).unwrap();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-a", "-r", "needle", "."])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.len() > 16 * 1024 * 1024);
+    assert_eq!(
+        output.stdout.iter().filter(|byte| **byte == b'\n').count(),
+        lines + 1
+    );
+    assert!(output.stdout.starts_with(b"./a.txt:1:needle\n"));
+    let last = [
+        b"./a.txt:",
+        (lines + 1).to_string().as_bytes(),
+        b":needle\xff\n",
+    ]
+    .concat();
+    assert!(output.stdout.ends_with(&last));
+}
+
+#[cfg(unix)]
+#[test]
+fn compact_run_leaves_formats_it_does_not_read_byte_for_byte() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(
+        temporary.path().join("a.txt"),
+        b"before\nneedle\xff\0payload\nafter\n",
+    )
+    .unwrap();
+    for search in [
+        &["grep", "-ah", "needle", "a.txt"][..],
+        &["rg", "--color=always", "-C1", "-a", "needle", "a.txt"][..],
+    ] {
+        let direct = std::process::Command::new(search[0])
+            .args(&search[1..])
+            .current_dir(temporary.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let through = Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(temporary.path())
+            .args(["compact", "--run", "--"])
+            .args(search)
+            .output()
+            .unwrap();
+        assert_eq!(through.status.code(), direct.status.code(), "{search:?}");
+        assert_eq!(through.stdout, direct.stdout, "{search:?}");
+    }
+}
+
+#[test]
+fn compact_run_keeps_a_nul_ending_matched_text_and_passes_unnumbered_rg_through() {
+    let temporary = tempfile::tempdir().unwrap();
+    fs::write(temporary.path().join("a.txt"), b"needle\0\n").unwrap();
+    let ended = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(temporary.path())
+        .args(["compact", "--run", "--", "grep", "-a", "needle", "a.txt"])
+        .output()
+        .unwrap();
+    assert_eq!(ended.status.code(), Some(0));
+    assert!(
+        ended.stdout.starts_with(b"a.txt\n1:needle\0\n"),
+        "{:?}",
+        String::from_utf8_lossy(&ended.stdout)
+    );
+    for flag in ["-N", "--no-line-number"] {
+        let direct = std::process::Command::new("rg")
+            .args([flag, "-a", "needle", "a.txt"])
+            .current_dir(temporary.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let through = Command::cargo_bin("ctx")
+            .unwrap()
+            .current_dir(temporary.path())
+            .args([
+                "compact", "--run", "--", "rg", flag, "-a", "needle", "a.txt",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(through.stdout, direct.stdout, "{flag}");
+    }
+}

@@ -129,6 +129,47 @@ The stdio server exposes `ctx_search`, `ctx_graph`, `ctx_pack` and `ctx_file`.
 Full `ctx_search` sends structured evidence once to protocol 2025-06-18+ clients;
 older clients also receive the text fallback. Compact pack output is unchanged.
 
+### Compact search hooks
+
+An agent's own `rg` and `grep` searches can come back cheaper to read. The
+PreToolUse hook `ctx hook rewrite` turns a search (alone, or in a `;`/`&&` list
+with plain reads: `sed -n 'A,Bp'`, `cat`, `nl`, `head`, `tail`, `wc`) into
+`ctx compact --run -- ...`. ctx checks every step against a known-safe set of
+options, starts it from PATH without a shell, and exits with the status the shell
+would give. Search output is grouped by file, each group of matches is preceded
+by the function holding it (`[function login 40-52]`), and the source the search
+points at follows within a token budget: the matched definitions and the lines
+around the densest groups of matches. Matched lines stay verbatim. Anything else
+(a pipe, a redirect, an expansion, an unknown option) runs untouched.
+
+Under `--run`, ctx adds `-H --null -n` to a content search so every line carries
+its path, ended by a NUL, and its number. Output it does not read (file lists,
+counts, quiet searches, no path or no number per line, a heading, forced colour)
+and output over 16 MB or not in UTF-8 go out byte for byte, as the search wrote
+them. One limit remains: a file name holding a newline cannot be told apart in
+line-based output; such a line is shown as is, unattributed.
+
+`ctx install --target claude` adds the hook to `.claude/settings.json`, with a
+PostToolUse hook (`ctx hook compact-output`) that compacts Claude's own Grep
+results the same way. For Codex, add it to `~/.codex/hooks.json`:
+
+```json
+{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [
+  { "type": "command", "command": "ctx hook rewrite --harness codex" } ] } ] } }
+```
+
+Codex applies a rewrite only with an explicit allow, so the hook allows the
+rewritten command: it only ever contains the checked steps above, and a `cd`
+prefix is not rewritten for Codex. `--expand-tokens N` sets the appended-source
+budget (default 600, chosen by bench; 0 disables it). `ctx compact` also filters any search
+output on stdin: `rg -n login | ctx compact`.
+
+Measured on 2026-10-23 against the same agent with no hook (paired runs, 90%
+bootstrap interval, answer quality unchanged): code questions cost Claude 14% fewer
+input tokens [9, 18] and 4% less after cache pricing [1, 7], Codex 6% fewer [0, 13];
+edits cost Codex 7% fewer [1, 14], and Claude about the same (its edits already read
+the whole file).
+
 ## Live indexing and freshness
 
 `ctx mcp` watches the repository for its session lifetime. To watch directly:

@@ -382,9 +382,22 @@ fn install_claude_metrics_hooks(root: &Path, path: &Path) -> Result<()> {
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
         .with_context(|| format!("hooks doit être un objet: {}", path.display()))?;
-    for (event, command) in [
-        ("Stop", "ctx hook after-turn --harness claude"),
-        ("SessionEnd", "ctx hook after-turn --harness claude"),
+    // Metrics after each turn, and the search hooks: a bare shell search runs under
+    // `ctx compact --run`, and a Grep content result comes back grouped by file with
+    // the source it points at.
+    for (event, matcher, command) in [
+        ("Stop", None, "ctx hook after-turn --harness claude"),
+        ("SessionEnd", None, "ctx hook after-turn --harness claude"),
+        (
+            "PreToolUse",
+            Some("Bash"),
+            "ctx hook rewrite --harness claude",
+        ),
+        (
+            "PostToolUse",
+            Some("Grep"),
+            "ctx hook compact-output --harness claude",
+        ),
     ] {
         let entries = hooks
             .entry(event)
@@ -402,12 +415,16 @@ fn install_claude_metrics_hooks(root: &Path, path: &Path) -> Result<()> {
                 })
         });
         if !present {
-            entries.push(json!({
+            let mut entry = json!({
                 "hooks": [{
                     "type": "command",
                     "command": command
                 }]
-            }));
+            });
+            if let Some(matcher) = matcher {
+                entry["matcher"] = json!(matcher);
+            }
+            entries.push(entry);
         }
     }
     write_json(root, path, &config)
