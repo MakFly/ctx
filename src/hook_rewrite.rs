@@ -399,16 +399,24 @@ pub fn post_tool_response(payload: &Value, harness: &str) -> Option<Value> {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok());
-    let compacted = crate::compact::compact(
+    let options = crate::compact::CompactOptions {
+        expand_tokens: EXPAND_TOKENS,
+        root,
+        ..crate::compact::CompactOptions::default()
+    };
+    let plain = crate::compact::compact(
         content,
         crate::compact::CompactOptions {
-            expand_tokens: EXPAND_TOKENS,
-            root,
-            ..crate::compact::CompactOptions::default()
+            expand_tokens: 0,
+            ..options.clone()
         },
     );
+    let compacted = crate::compact::compact(content, options);
+    // The appended source is the point (it saves the read that follows), so it is
+    // kept even when it makes the result longer; plain compaction must shrink it.
+    let expanded = compacted.len() > plain.len();
     let compacted = compacted.trim_end_matches('\n');
-    if compacted.len() >= content.len() {
+    if !expanded && compacted.len() >= content.len() {
         return None;
     }
     let mut updated = response.clone();
@@ -541,6 +549,19 @@ mod tests {
         let single =
             json!({"tool_name": "Grep", "tool_response": {"mode": "content", "content": "x"}});
         assert!(post_tool_response(&single, "claude").is_none());
+        // A single match grows once the lines around it are appended, and is still sent.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.ts"), "one\ntwo\nthree\n").unwrap();
+        let near = json!({"tool_name": "Grep", "cwd": dir.path(),
+            "tool_response": {"mode": "content", "content": "a.ts:2:two", "numLines": 1}});
+        let out = post_tool_response(&near, "claude").unwrap();
+        let content = out["hookSpecificOutput"]["updatedToolOutput"]["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            content.contains("around the matches:\n## a.ts 1-3\n1\tone\n"),
+            "{content}"
+        );
     }
 
     #[test]
