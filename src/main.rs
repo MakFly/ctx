@@ -297,6 +297,16 @@ enum MetricsCommand {
         #[arg(long)]
         output_tokens: u64,
     },
+    /// Import paired benchmark measurements (JSON lines) as measured savings.
+    ImportBench {
+        file: PathBuf,
+        /// Arm measured with ctx.
+        #[arg(long, default_value = "ctx")]
+        arm: String,
+        /// Arm used as the plain baseline.
+        #[arg(long, default_value = "base")]
+        base: String,
+    },
     /// Configure model pricing used by reports.
     Pricing {
         #[command(subcommand)]
@@ -986,6 +996,12 @@ fn execute_metrics(command: MetricsCommand) -> Result<()> {
                 output_tokens,
             )
         }
+        MetricsCommand::ImportBench { file, arm, base } => {
+            let root = std::env::current_dir()?;
+            let (imported, skipped) = ctx_code::metrics::import_bench(&root, &file, &arm, &base)?;
+            println!("imported {imported} pairs ({skipped} skipped)");
+            Ok(())
+        }
         MetricsCommand::Pricing { command } => match command {
             MetricsPricingCommand::Set {
                 model,
@@ -1118,36 +1134,45 @@ fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport, database: 
         36,
     );
     let estimated = matches!(report.savings_confidence.as_str(), "estimated" | "mixed");
-    let savings_color = if estimated { 33 } else { 32 };
-    match (report.saved_input_tokens, report.baseline_input_tokens) {
-        (Some(saved), Some(baseline)) if baseline > 0 => {
-            let percent = saved as f64 * 100.0 / baseline as f64;
-            let confidence = if report.savings_confidence == "unknown" {
-                String::new()
+    let measured_saved = report
+        .measured_saved_input_tokens
+        .filter(|_| report.measured_baseline_input_tokens > 0);
+    let measured_percent = measured_saved
+        .map(|saved| saved as f64 * 100.0 / report.measured_baseline_input_tokens as f64);
+    if let Some((saved, percent)) = measured_saved.zip(measured_percent) {
+        let note = if saved < 0 {
+            "measured: ctx used more"
+        } else {
+            "measured"
+        };
+        print_metric(
+            if estimated {
+                "Tokens saved (measured)"
             } else {
-                format!(", {}", report.savings_confidence)
-            };
-            print_metric(
-                if report.savings_confidence == "mixed" {
-                    "Tokens saved (mixed)"
-                } else if estimated {
-                    "Est. tokens saved"
-                } else {
-                    "Tokens saved"
-                },
-                format!("{} ({percent:.1}%{confidence})", format_count(saved)),
-                savings_color,
-            );
+                "Tokens saved"
+            },
+            format!("{} ({percent:.1}%, {note})", format_signed_count(saved)),
+            if saved < 0 { 33 } else { 32 },
+        );
+        if !estimated {
             print_metric(
                 "Efficiency meter",
                 efficiency_meter(Some(percent)),
-                savings_color,
+                if saved < 0 { 33 } else { 32 },
             );
         }
-        _ => {
-            print_metric("Tokens saved", "n/a (baseline unavailable)".to_owned(), 33);
-            print_metric("Efficiency meter", efficiency_meter(None), 33);
+    }
+    if estimated {
+        if let Some(avoided) = report.estimated_context_avoided_tokens {
+            print_metric(
+                "Context avoided vs whole files (estimate)",
+                format_count(avoided),
+                33,
+            );
         }
+    } else if measured_saved.is_none() {
+        print_metric("Tokens saved", "n/a (baseline unavailable)".to_owned(), 33);
+        print_metric("Efficiency meter", efficiency_meter(None), 33);
     }
     print_metric(
         "Total exec time",
@@ -1162,8 +1187,20 @@ fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport, database: 
         Some(cost) => print_metric("Estimated cost", format!("{cost:.6} USD"), 32),
         None => print_metric("Estimated cost", "unknown pricing".to_owned(), 33),
     }
-    if let Some(cost) = report.estimated_saved_cost_usd {
-        print_metric("Estimated saved cost", format!("{cost:.6} USD"), 32);
+    if let Some(cost) = report.estimated_saved_cost_usd
+        && report
+            .measured_saved_input_tokens
+            .is_none_or(|saved| saved >= 0)
+    {
+        print_metric(
+            if estimated {
+                "Est. cost avoided"
+            } else {
+                "Estimated saved cost"
+            },
+            format!("{cost:.6} USD"),
+            32,
+        );
     }
     if report.cache_hits > 0 {
         print_metric("Cache hits", report.cache_hits.to_string(), 32);
@@ -1171,12 +1208,10 @@ fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport, database: 
 
     println!();
     println!("Provider totals include only usage reported by the harness.");
-    if report.savings_confidence == "mixed" {
-        println!("This total combines paired measurements and estimates.");
-    }
     if estimated {
-        println!("Estimated savings compare cited source files with returned context.");
-        println!("They are not a measured reduction in model usage or billing.");
+        println!(
+            "Estimates compare returned context with whole cited files; they are not a measured reduction in model usage."
+        );
     } else if report.savings_confidence == "exact" {
         println!("Savings use recorded provider usage and a paired no-ctx baseline.");
     }
@@ -1186,7 +1221,13 @@ fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport, database: 
     println!("{rule}");
     println!(
         "{:<3} {:<16} {:>8} {:>10} {:>7} {:>9} {:<12}",
-        "#", "Operation", "Count", "Saved", "Avg%", "Time", "Impact"
+        "#",
+        "Operation",
+        "Count",
+        if estimated { "Avoided" } else { "Saved" },
+        "Avg%",
+        "Time",
+        "Impact"
     );
     println!("{rule}");
     if report.by_operation.is_empty() {
@@ -1277,6 +1318,15 @@ fn format_count(value: u64) -> String {
         format!("{:.1}K", value as f64 / 1_000.0)
     } else {
         value.to_string()
+    }
+}
+
+fn format_signed_count(value: i64) -> String {
+    let count = format_count(value.unsigned_abs());
+    if value < 0 {
+        format!("-{count}")
+    } else {
+        count
     }
 }
 

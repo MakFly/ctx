@@ -113,9 +113,16 @@ fn gain_reports_recorded_events_and_preserves_metrics_json() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("Last 30 days"));
     assert!(text.contains("Total commands:          1\n"));
-    assert!(text.contains("Est. tokens saved:       192 (75.0%, estimated)"));
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("Context avoided vs whole files (estimate)"))
+        .unwrap();
+    assert!(line.ends_with(" 192"));
+    assert!(!line.contains('%'));
+    assert!(!text.contains("Efficiency meter"));
+    assert!(!text.contains("Est. tokens saved"));
     assert!(text.contains("ctx_pack"));
-    assert!(text.contains("not a measured reduction in model usage or billing"));
+    assert!(text.contains("they are not a measured reduction in model usage."));
 
     let mut previous = None;
     for arguments in [
@@ -136,6 +143,60 @@ fn gain_reports_recorded_events_and_preserves_metrics_json() {
         }
         previous = Some(value);
     }
+}
+
+#[test]
+fn import_bench_reports_negative_measured_savings_and_is_idempotent() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path();
+    let rows = [
+        ("base", 1, 100, 1_000),
+        ("ctx", 1, 200, 1_100),
+        ("base", 2, 100, 1_000),
+        ("ctx", 2, 300, 1_100),
+    ]
+    .iter()
+    .map(|(arm, rep, uncached, cache_read)| {
+        serde_json::json!({
+            "h": "demo", "arm": arm, "q": "where is x", "rep": rep, "warm": false,
+            "ok": true, "uncached": uncached, "cacheWrite": 0, "cacheRead": cache_read,
+            "output": 10
+        })
+        .to_string()
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+    let results = root.join("results.jsonl");
+    fs::write(&results, rows).unwrap();
+    for _ in 0..2 {
+        metrics_cli(root)
+            .args(["metrics", "import-bench"])
+            .arg(&results)
+            .assert()
+            .success()
+            .stdout("imported 2 pairs (0 skipped)\n");
+    }
+
+    let output = metrics_cli(root).arg("gain").output().unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    // baseline 2 x 1100, ctx 1300 + 1400: ctx used 500 more (-22.7%).
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("Tokens saved:"))
+        .unwrap();
+    assert!(
+        line.contains("-500 (-22.7%, measured: ctx used more)"),
+        "{line}"
+    );
+    assert!(text.contains("[....................................] -22.7%"));
+
+    let output = metrics_cli(root).args(["gain", "--json"]).output().unwrap();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["measured_pairs"], 2);
+    assert_eq!(value["measured_saved_input_tokens"], -500);
+    assert_eq!(value["measured_baseline_input_tokens"], 2_200);
+    assert_eq!(value["measured_input_tokens"], 2_700);
 }
 
 #[test]

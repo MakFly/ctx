@@ -114,6 +114,15 @@ pub struct MetricsReport {
     pub saved_output_tokens: Option<u64>,
     pub estimated_saved_cost_usd: Option<f64>,
     pub savings_confidence: String,
+    /// Baseline input of measured pairs only (paired runs and imported benchmark pairs).
+    pub measured_baseline_input_tokens: u64,
+    /// Input actually used by the measured pairs.
+    pub measured_input_tokens: u64,
+    pub measured_pairs: u64,
+    /// Signed: negative when ctx used more input than the baseline.
+    pub measured_saved_input_tokens: Option<i64>,
+    /// Estimate only: cited whole files minus returned context. Not a measured reduction.
+    pub estimated_context_avoided_tokens: Option<u64>,
     pub by_operation: Vec<AggregateGroup>,
     pub by_project: Vec<AggregateGroup>,
     pub by_harness: Vec<AggregateGroup>,
@@ -155,6 +164,10 @@ struct AggregateState {
     savings_events: u64,
     exact_savings_events: u64,
     estimated_savings_events: u64,
+    measured_baseline_input_tokens: u64,
+    measured_input_tokens: u64,
+    measured_saved_input_tokens: i64,
+    estimated_context_avoided_tokens: u64,
     saved_cost_usd: Option<f64>,
     duration_ms: u64,
 }
@@ -528,6 +541,108 @@ pub fn list_pricing() -> Result<Vec<Pricing>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Imports paired benchmark rows as `bench_pair` events; returns (imported, skipped).
+/// Each valid `arm` row is paired with the valid `base` row of the same (h, q, rep).
+/// Event ids are derived from the file and the row key, so re-importing is idempotent.
+pub fn import_bench(root: &Path, file: &Path, arm: &str, base: &str) -> Result<(usize, usize)> {
+    let root = repo_root(root)?;
+    let canonical = fs::canonicalize(file)
+        .with_context(|| format!("cannot read benchmark results {}", file.display()))?;
+    let reader = BufReader::new(fs::File::open(&canonical)?);
+    let mut arm_rows = Vec::new();
+    let mut base_rows = std::collections::HashMap::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let (Some(harness), Some(query)) = (
+            row.get("h").and_then(Value::as_str),
+            row.get("q").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let row_arm = row.get("arm").and_then(Value::as_str).unwrap_or_default();
+        let key = (
+            harness.to_owned(),
+            query.to_owned(),
+            row.get("rep").map(Value::to_string).unwrap_or_default(),
+        );
+        let usable = !row.get("warm").and_then(Value::as_bool).unwrap_or(false)
+            && row.get("ok").and_then(Value::as_bool).unwrap_or(true);
+        if row_arm == arm {
+            arm_rows.push((key, usable.then(|| bench_usage(&row))));
+        } else if row_arm == base && usable {
+            base_rows.insert(key, bench_usage(&row));
+        }
+    }
+    let (project_id, project_name) = project_id(&root)?;
+    let created_at = now_seconds();
+    let (mut imported, mut skipped) = (0, 0);
+    for ((harness, query, rep), usage) in arm_rows {
+        let (Some(usage), Some(baseline)) = (
+            usage,
+            base_rows.get(&(harness.clone(), query.clone(), rep.clone())),
+        ) else {
+            skipped += 1;
+            continue;
+        };
+        let identity = format!("{}\0{harness}\0{query}\0{rep}\0{arm}", canonical.display());
+        store_event(
+            &root,
+            &MetricEvent {
+                event_id: format!("{:x}", Sha256::digest(identity.as_bytes())),
+                created_at,
+                project_id: project_id.clone(),
+                project_name: project_name.clone(),
+                kind: "bench_pair".to_owned(),
+                harness,
+                model: String::new(),
+                confidence: "exact".to_owned(),
+                query_hash: Some(hash_query(&query)),
+                input_tokens: Some(usage.0),
+                cached_input_tokens: None,
+                output_tokens: Some(usage.1),
+                reasoning_tokens: None,
+                ctx_tokens: None,
+                baseline_input_tokens: Some(baseline.0),
+                baseline_output_tokens: Some(baseline.1),
+                saved_input_tokens: None,
+                saved_output_tokens: None,
+                duration_ms: None,
+                cache_hit: false,
+                tool_calls: 0,
+                baseline_paths: None,
+            },
+        )?;
+        imported += 1;
+    }
+    Ok((imported, skipped))
+}
+
+/// (total input, output) of one benchmark row.
+fn bench_usage(row: &Value) -> (u64, u64) {
+    let number = |key: &str| {
+        row.get(key)
+            .and_then(|value| {
+                value.as_u64().or_else(|| {
+                    value
+                        .as_f64()
+                        .filter(|v| *v >= 0.0)
+                        .map(|v| v.round() as u64)
+                })
+            })
+            .unwrap_or(0)
+    };
+    (
+        number("uncached") + number("cacheWrite") + number("cacheRead"),
+        number("output"),
+    )
+}
+
 fn store_event(root: &Path, event: &MetricEvent) -> Result<()> {
     let mut event = event.clone();
     if event.baseline_input_tokens.is_none()
@@ -732,6 +847,12 @@ fn build_report(
                 .output_tokens
                 .map(|value| baseline_output.saturating_sub(value));
         }
+        if event.kind == "bench_pair"
+            && event.saved_input_tokens.is_none()
+            && let (Some(input), Some(baseline)) = (event.input_tokens, event.baseline_input_tokens)
+        {
+            event.saved_input_tokens = Some(baseline.saturating_sub(input));
+        }
         accumulate(&mut state, &event, pricing);
         accumulate_group(
             &mut projects,
@@ -783,6 +904,13 @@ fn build_report(
         } else {
             "unknown".to_owned()
         },
+        measured_baseline_input_tokens: state.measured_baseline_input_tokens,
+        measured_input_tokens: state.measured_input_tokens,
+        measured_pairs: state.exact_savings_events,
+        measured_saved_input_tokens: (state.exact_savings_events > 0)
+            .then_some(state.measured_saved_input_tokens),
+        estimated_context_avoided_tokens: (state.estimated_savings_events > 0)
+            .then_some(state.estimated_context_avoided_tokens),
         by_operation: operations.into_values().collect(),
         by_project: projects.into_values().collect(),
         by_harness: harnesses.into_values().collect(),
@@ -820,8 +948,22 @@ fn accumulate(state: &mut AggregateState, event: &MetricEvent, pricing: &[Pricin
             state.savings_events += 1;
             if event.confidence == "estimated" {
                 state.estimated_savings_events += 1;
+                state.estimated_context_avoided_tokens += value;
             } else {
                 state.exact_savings_events += 1;
+                let baseline = event.baseline_input_tokens;
+                let saved = match (event.input_tokens, baseline) {
+                    (Some(input), Some(baseline)) => {
+                        to_signed(baseline).saturating_sub(to_signed(input))
+                    }
+                    _ => to_signed(value),
+                };
+                state.measured_baseline_input_tokens += baseline.unwrap_or(0);
+                state.measured_input_tokens += to_signed(baseline.unwrap_or(0))
+                    .saturating_sub(saved)
+                    .max(0) as u64;
+                state.measured_saved_input_tokens =
+                    state.measured_saved_input_tokens.saturating_add(saved);
             }
             if let Some(cost) = event_savings_cost(event, pricing) {
                 *state.saved_cost_usd.get_or_insert(0.0) += cost;
@@ -832,6 +974,10 @@ fn accumulate(state: &mut AggregateState, event: &MetricEvent, pricing: &[Pricin
     if let Some(cost) = event_cost(event, pricing) {
         *state.cost_usd.get_or_insert(0.0) += cost;
     }
+}
+
+fn to_signed(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn accumulate_group(
@@ -955,6 +1101,11 @@ fn empty_report(scope: &str, since_days: u64) -> MetricsReport {
         saved_output_tokens: None,
         estimated_saved_cost_usd: None,
         savings_confidence: "unknown".to_owned(),
+        measured_baseline_input_tokens: 0,
+        measured_input_tokens: 0,
+        measured_pairs: 0,
+        measured_saved_input_tokens: None,
+        estimated_context_avoided_tokens: None,
         by_project: Vec::new(),
         by_operation: Vec::new(),
         by_harness: Vec::new(),
@@ -1173,5 +1324,114 @@ mod tests {
         assert_eq!(report.saved_input_tokens, Some(1_075));
         assert_eq!(report.baseline_input_tokens, Some(2_100));
         assert_eq!(report.savings_confidence, "mixed");
+    }
+
+    fn bench_pair(id: &str, input: u64, baseline: u64) -> MetricEvent {
+        let mut pair = event();
+        pair.event_id = id.to_owned();
+        pair.kind = "bench_pair".to_owned();
+        pair.model.clear();
+        pair.input_tokens = Some(input);
+        pair.baseline_input_tokens = Some(baseline);
+        pair.ctx_tokens = None;
+        pair.tool_calls = 0;
+        pair
+    }
+
+    #[test]
+    fn estimate_only_report_has_no_measured_savings() {
+        let mut estimated = event();
+        estimated.kind = "mcp_pack".to_owned();
+        estimated.confidence = "estimated".to_owned();
+        estimated.input_tokens = None;
+        estimated.baseline_input_tokens = Some(100);
+        estimated.saved_input_tokens = Some(75);
+        let report = build_report("project", 30, &[estimated], &[]).unwrap();
+        assert_eq!(report.savings_confidence, "estimated");
+        assert_eq!(report.measured_pairs, 0);
+        assert_eq!(report.measured_baseline_input_tokens, 0);
+        assert_eq!(report.measured_input_tokens, 0);
+        assert_eq!(report.measured_saved_input_tokens, None);
+        assert_eq!(report.estimated_context_avoided_tokens, Some(75));
+    }
+
+    #[test]
+    fn bench_pairs_report_signed_measured_savings() {
+        let report = build_report(
+            "project",
+            30,
+            &[bench_pair("a", 1_200, 1_000), bench_pair("b", 1_300, 1_000)],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(report.savings_confidence, "exact");
+        assert_eq!(report.measured_pairs, 2);
+        assert_eq!(report.measured_baseline_input_tokens, 2_000);
+        assert_eq!(report.measured_input_tokens, 2_500);
+        assert_eq!(report.measured_saved_input_tokens, Some(-500));
+        assert_eq!(report.saved_input_tokens, Some(0));
+        let report = build_report(
+            "project",
+            30,
+            &[bench_pair("a", 1_200, 1_000), bench_pair("b", 400, 1_000)],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(report.measured_saved_input_tokens, Some(400));
+    }
+
+    #[test]
+    fn mixed_report_keeps_measured_and_estimated_apart() {
+        let mut estimated = event();
+        estimated.event_id = "estimated".to_owned();
+        estimated.kind = "mcp_pack".to_owned();
+        estimated.confidence = "estimated".to_owned();
+        estimated.input_tokens = None;
+        estimated.baseline_input_tokens = Some(10_000);
+        estimated.saved_input_tokens = Some(9_000);
+        let report = build_report(
+            "project",
+            30,
+            &[bench_pair("a", 1_200, 1_000), estimated],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(report.savings_confidence, "mixed");
+        assert_eq!(report.measured_pairs, 1);
+        assert_eq!(report.measured_saved_input_tokens, Some(-200));
+        assert_eq!(report.measured_baseline_input_tokens, 1_000);
+        assert_eq!(report.estimated_context_avoided_tokens, Some(9_000));
+    }
+
+    #[test]
+    fn import_bench_skips_warm_and_failed_rows_and_is_idempotent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let results = root.join("results.jsonl");
+        let rows = [
+            r#"{"h":"a","arm":"base","q":"one","rep":1,"warm":false,"ok":true,"uncached":100,"cacheWrite":10,"cacheRead":890,"output":5}"#,
+            r#"{"h":"a","arm":"ctx","q":"one","rep":1,"warm":false,"ok":true,"uncached":200,"cacheWrite":10,"cacheRead":890,"output":6}"#,
+            r#"{"h":"a","arm":"base","q":"one","rep":2,"warm":true,"ok":true,"uncached":1,"cacheWrite":1,"cacheRead":1,"output":1}"#,
+            r#"{"h":"a","arm":"ctx","q":"one","rep":2,"warm":false,"ok":true,"uncached":1,"cacheWrite":1,"cacheRead":1,"output":1}"#,
+            r#"{"h":"a","arm":"base","q":"two","rep":1,"warm":false,"ok":true,"uncached":1,"cacheWrite":1,"cacheRead":1,"output":1}"#,
+            r#"{"h":"a","arm":"ctx","q":"two","rep":1,"warm":false,"ok":false,"uncached":1,"cacheWrite":1,"cacheRead":1,"output":1}"#,
+            r#"{"h":"a","arm":"ctx","q":"three","rep":1,"warm":true,"ok":true,"uncached":1,"cacheWrite":1,"cacheRead":1,"output":1}"#,
+        ];
+        fs::write(&results, rows.join("\n")).unwrap();
+        let directory = ctx_dir(&repo_root(root).unwrap());
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("config.toml"), "[metrics]\nglobal = false\n").unwrap();
+        let first = import_bench(root, &results, "ctx", "base").unwrap();
+        let second = import_bench(root, &results, "ctx", "base").unwrap();
+        assert_eq!(first, (1, 3));
+        assert_eq!(second, first);
+        let connection = open_database(&directory.join("metrics.sqlite")).unwrap();
+        let events = read_events(&connection, 0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "bench_pair");
+        assert_eq!(events[0].input_tokens, Some(1_100));
+        assert_eq!(events[0].baseline_input_tokens, Some(1_000));
+        assert_eq!(events[0].baseline_output_tokens, Some(5));
+        assert_eq!(events[0].query_hash, Some(hash_query("one")));
     }
 }
