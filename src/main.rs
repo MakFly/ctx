@@ -1176,235 +1176,342 @@ fn execute_metrics_report(arguments: MetricsReportArgs) -> Result<()> {
     Ok(())
 }
 
+/// Text width of the dashboard: notes wrap inside it, the table fits in it.
+const DASHBOARD_WIDTH: usize = 72;
+const LABEL_WIDTH: usize = 15;
+
+fn paint(text: impl AsRef<str>, codes: &str) -> String {
+    ctx_code::terminal::stdout_codes(text, codes)
+}
+
 fn print_metrics_dashboard(report: &ctx_code::metrics::MetricsReport, database: &Path) {
     let scope = if report.scope == "global" {
-        "Global Scope"
+        "global"
     } else {
-        "Project Scope"
+        "this project"
     };
     println!(
-        "{}",
-        ctx_code::terminal::stdout(format!("CTX Token Savings ({scope})"), 32)
+        "{}  {}",
+        paint("ctx gain", "1"),
+        paint(format!("{scope}, last {} days", report.since_days), "2")
     );
-    println!(
-        "{}",
-        ctx_code::terminal::stdout(
-            "============================================================",
-            32
-        )
-    );
-    println!();
-    print_metric("Period", format!("Last {} days", report.since_days), 36);
-    println!("Metrics file: {}", database.display());
     println!();
 
     if report.events == 0 {
         println!(
-            "{}",
-            ctx_code::terminal::stdout(
+            "  {}",
+            paint(
                 format!("No usage recorded in the last {} days.", report.since_days),
-                33
+                "33"
             )
         );
+        let mut notes = Vec::new();
         if database.is_file() {
-            println!("The metrics file exists, but this period contains no events.");
-            println!("Try a longer period: ctx gain --since-days 90");
+            notes.push("The metrics file exists, but this period holds no events. Try a longer period: ctx\u{a0}gain\u{a0}--since-days\u{a0}90".to_owned());
         } else {
-            println!("No metrics file exists at the path above.");
+            notes.push("No metrics file exists at the path below.".to_owned());
         }
-        println!("Usage is recorded by agent MCP calls, ctx run, and installed hooks.");
-        println!("Standalone ctx search/pack commands do not record usage metrics.");
+        notes.push("Agent MCP calls, ctx run and installed hooks record usage; standalone ctx search and ctx pack do not.".to_owned());
         if report.scope == "project" {
-            println!("Check CTX_DIR if your agent uses a different index directory.");
-            println!("Use ctx gain --global to see metrics across projects.");
+            notes.push("Check CTX_DIR if your agent uses another index directory, or see every project with ctx\u{a0}gain\u{a0}--global.".to_owned());
         }
-        print_dashboard_help();
+        for note in notes {
+            println!();
+            print_note(&note);
+        }
+        println!();
+        print_footer(report, database);
         return;
     }
 
+    print_headline(report);
+
     let commands = report.mcp_calls + report.run_calls;
-    let average_ms = if commands == 0 {
-        0
-    } else {
-        report.total_duration_ms / commands
-    };
-    print_metric("Total commands", commands.to_string(), 36);
-    print_metric(
-        "Provider input tokens",
-        format_count(report.input_tokens),
-        36,
-    );
-    print_metric("Context tokens (est.)", format_count(report.ctx_tokens), 36);
-    print_metric(
-        "Provider output tokens",
-        format_count(report.output_tokens),
-        36,
-    );
-    let estimated = matches!(report.savings_confidence.as_str(), "estimated" | "mixed");
-    let measured_saved = report
-        .measured_saved_input_tokens
-        .filter(|_| report.measured_baseline_input_tokens > 0);
-    let measured_percent = measured_saved
-        .map(|saved| saved as f64 * 100.0 / report.measured_baseline_input_tokens as f64);
-    if let Some((saved, percent)) = measured_saved.zip(measured_percent) {
-        let note = if saved < 0 {
-            "measured: ctx used more"
-        } else {
-            "measured"
-        };
-        print_metric(
-            if estimated {
-                "Tokens saved (measured)"
-            } else {
-                "Tokens saved"
-            },
-            format!("{} ({percent:.1}%, {note})", format_signed_count(saved)),
-            if saved < 0 { 33 } else { 32 },
+    let average_ms = report
+        .total_duration_ms
+        .checked_div(commands)
+        .unwrap_or_default();
+    if commands > 0 {
+        print_row(
+            "Calls",
+            format!(
+                "{}  in {}, {} on average",
+                group_digits(commands),
+                format_duration(report.total_duration_ms),
+                format_duration(average_ms)
+            ),
         );
-        if !estimated {
-            print_metric(
-                "Efficiency meter",
-                efficiency_meter(Some(percent)),
-                if saved < 0 { 33 } else { 32 },
-            );
-        }
     }
-    if estimated {
-        if let Some(avoided) = report.estimated_context_avoided_tokens {
-            print_metric(
-                "Context avoided vs whole files (estimate)",
-                format_count(avoided),
-                33,
-            );
-        }
-    } else if measured_saved.is_none() {
-        print_metric("Tokens saved", "n/a (baseline unavailable)".to_owned(), 33);
-        print_metric("Efficiency meter", efficiency_meter(None), 33);
+    if report.cache_hits > 0 {
+        print_row("Cache hits", group_digits(report.cache_hits));
     }
-    print_metric(
-        "Total exec time",
-        format!(
-            "{} (avg {})",
-            format_duration(report.total_duration_ms),
-            format_duration(average_ms)
-        ),
-        36,
-    );
-    match report.estimated_cost_usd {
-        Some(cost) => print_metric("Estimated cost", format!("{cost:.6} USD"), 32),
-        None => print_metric("Estimated cost", "unknown pricing".to_owned(), 33),
+    if report.input_tokens > 0 || report.output_tokens > 0 {
+        print_row(
+            "Harness usage",
+            format!(
+                "{} input, {} output tokens",
+                format_count(report.input_tokens),
+                format_count(report.output_tokens)
+            ),
+        );
+    }
+    if report.ctx_tokens > 0 {
+        print_row(
+            "Context sent",
+            format!("{} tokens", format_count(report.ctx_tokens)),
+        );
+    }
+    if let Some(cost) = report.estimated_cost_usd {
+        print_row("Cost", format!("{cost:.4} USD"));
     }
     if let Some(cost) = report.estimated_saved_cost_usd
         && report
             .measured_saved_input_tokens
             .is_none_or(|saved| saved >= 0)
     {
-        print_metric(
-            if estimated {
-                "Est. cost avoided"
-            } else {
-                "Estimated saved cost"
-            },
-            format!("{cost:.6} USD"),
-            32,
-        );
+        print_row("Cost avoided", format!("{cost:.4} USD"));
     }
-    if report.cache_hits > 0 {
-        print_metric("Cache hits", report.cache_hits.to_string(), 32);
-    }
-
     println!();
-    println!("Provider totals include only usage reported by the harness.");
+    print_operations(report);
+    println!();
+    let estimated = matches!(report.savings_confidence.as_str(), "estimated" | "mixed");
     if estimated {
-        println!(
-            "Estimates compare returned context with whole cited files; they are not a measured reduction in model usage."
+        print_note(
+            "Kept out compares the context ctx returned with the whole files it cited: an estimate, not a measured reduction in model usage. ctx\u{a0}metrics\u{a0}import-bench records measured pairs.",
         );
     } else if report.savings_confidence == "exact" {
-        println!("Savings use recorded provider usage and a paired no-ctx baseline.");
+        print_note("Savings compare recorded harness usage with a paired run without ctx.");
     }
+    print_note("Harness usage counts only what the harness reported.");
     println!();
-    println!("{}", ctx_code::terminal::stdout("By Operation", 32));
-    let rule = ctx_code::terminal::stdout("-".repeat(71), 32);
-    println!("{rule}");
-    println!(
-        "{:<3} {:<16} {:>8} {:>10} {:>7} {:>9} {:<12}",
-        "#",
-        "Operation",
-        "Count",
-        if estimated { "Avoided" } else { "Saved" },
-        "Avg%",
-        "Time",
-        "Impact"
-    );
-    println!("{rule}");
-    if report.by_operation.is_empty() {
+    print_footer(report, database);
+}
+
+/// The one figure that matters, then a bar of its share.
+fn print_headline(report: &ctx_code::metrics::MetricsReport) {
+    let measured = report
+        .measured_saved_input_tokens
+        .filter(|_| report.measured_baseline_input_tokens > 0);
+    if let Some(saved) = measured {
+        let baseline = report.measured_baseline_input_tokens;
+        let percent = saved as f64 * 100.0 / baseline as f64;
+        let color = if saved < 0 { "1;33" } else { "1;32" };
+        let verb = if saved < 0 {
+            "more input tokens with ctx"
+        } else {
+            "input tokens saved"
+        };
         println!(
-            "{}",
-            ctx_code::terminal::stdout("No MCP or ctx run calls recorded in this period.", 33)
+            "  {}  {}",
+            paint(format_signed_count(saved.abs()), color),
+            paint(verb, "1")
         );
-    } else {
-        for (index, operation) in report.by_operation.iter().enumerate() {
-            let saved = operation
-                .saved_input_tokens
-                .map(format_count)
-                .unwrap_or_else(|| "-".to_owned());
-            let average = operation
-                .saved_input_tokens
-                .zip(operation.baseline_input_tokens)
-                .filter(|(_, baseline)| *baseline > 0)
-                .map(|(saved, baseline)| format!("{:.1}%", saved as f64 * 100.0 / baseline as f64))
-                .unwrap_or_else(|| "-".to_owned());
-            let impact = operation
-                .saved_input_tokens
-                .zip(operation.baseline_input_tokens)
-                .filter(|(_, baseline)| *baseline > 0)
-                .map(|(saved, baseline)| saved as f64 * 100.0 / baseline as f64);
-            let name = operation_name(&operation.name);
-            let name_color = if operation.saved_input_tokens.is_some() {
-                36
-            } else {
-                37
-            };
-            println!(
-                "{:<3} {} {:>8} {:>10} {:>7} {:>9} {}",
-                format!("{}.", index + 1),
-                ctx_code::terminal::stdout(format!("{name:<16}"), name_color),
-                operation.events,
-                saved,
-                average,
-                format_duration(operation.duration_ms),
-                ctx_code::terminal::stdout(
-                    impact_bar(impact, 10),
-                    if impact.is_some() { 36 } else { 33 }
-                )
-            );
-        }
-    }
-    println!("{rule}");
-    if report.scope == "global" && !report.by_project.is_empty() {
         println!(
-            "{}",
-            ctx_code::terminal::stdout(
-                format!("Projects tracked: {}", report.by_project.len()),
-                36
+            "  {}",
+            paint(
+                format!(
+                    "against {} input tokens without ctx, measured over {} {}",
+                    format_count(baseline),
+                    report.measured_pairs,
+                    if report.measured_pairs == 1 {
+                        "pair"
+                    } else {
+                        "pairs"
+                    }
+                ),
+                "2"
             )
         );
+        println!("  {}", share_bar(percent, 40));
+        println!();
     }
-    print_dashboard_help();
+    let (kept, cited) = estimate_totals(report);
+    if cited > 0 {
+        let percent = kept as f64 * 100.0 / cited as f64;
+        println!(
+            "  {}  {}",
+            paint(
+                format_count(kept),
+                if measured.is_some() { "1" } else { "1;32" }
+            ),
+            paint("tokens kept out of context, estimated", "1")
+        );
+        println!(
+            "  {}",
+            paint(
+                format!(
+                    "out of {} tokens in the files ctx cited",
+                    format_count(cited)
+                ),
+                "2"
+            )
+        );
+        println!("  {}", share_bar(percent, 40));
+        println!();
+    } else if measured.is_none() {
+        println!(
+            "  {}",
+            paint("No savings to show yet: no baseline recorded.", "33")
+        );
+        println!();
+    }
 }
 
-fn print_dashboard_help() {
-    println!();
-    println!("Views: ctx gain --project | ctx gain --since-days 7 | ctx gain --json");
-    println!("Help:  ctx --help");
+/// Estimated tokens kept out and tokens in the cited whole files, over the
+/// operations that carry an estimate.
+fn estimate_totals(report: &ctx_code::metrics::MetricsReport) -> (u64, u64) {
+    if !matches!(report.savings_confidence.as_str(), "estimated" | "mixed") {
+        return (0, 0);
+    }
+    report
+        .by_operation
+        .iter()
+        .filter_map(|operation| {
+            operation
+                .saved_input_tokens
+                .zip(operation.baseline_input_tokens)
+        })
+        .fold((0, 0), |(kept, cited), (saved, baseline)| {
+            (kept + saved, cited + baseline)
+        })
 }
 
-fn print_metric(label: &str, value: String, value_color: u8) {
+fn print_operations(report: &ctx_code::metrics::MetricsReport) {
+    if report.by_operation.is_empty() {
+        print_note("No MCP or ctx run calls recorded in this period.");
+        return;
+    }
+    let estimated = matches!(report.savings_confidence.as_str(), "estimated" | "mixed");
     println!(
-        "{} {}",
-        ctx_code::terminal::stdout(format!("{:<24}", format!("{label}:")), 36),
-        ctx_code::terminal::stdout(value, value_color)
+        "  {}",
+        paint(
+            format!(
+                "{:<14} {:>7} {:>9} {:>6} {:>8}  {}",
+                "Operation",
+                "Calls",
+                if estimated { "Kept out" } else { "Saved" },
+                "Share",
+                "Time",
+                ""
+            )
+            .trim_end(),
+            "2"
+        )
     );
+    let mut operations: Vec<_> = report.by_operation.iter().collect();
+    operations.sort_by(|left, right| {
+        right
+            .saved_input_tokens
+            .cmp(&left.saved_input_tokens)
+            .then(right.events.cmp(&left.events))
+    });
+    for operation in operations {
+        let share = operation
+            .saved_input_tokens
+            .zip(operation.baseline_input_tokens)
+            .filter(|(_, baseline)| *baseline > 0)
+            .map(|(saved, baseline)| saved as f64 * 100.0 / baseline as f64);
+        let row = format!(
+            "{:<14} {:>7} {:>9} {:>6} {:>8}",
+            operation_name(&operation.name),
+            group_digits(operation.events),
+            operation
+                .saved_input_tokens
+                .map(format_count)
+                .unwrap_or_else(|| "-".to_owned()),
+            share
+                .map(|share| format!("{share:.1}%"))
+                .unwrap_or_else(|| "-".to_owned()),
+            format_duration(operation.duration_ms),
+        );
+        match share {
+            Some(share) => println!("  {row}  {}", paint(bar(share, 12), "32")),
+            None => println!("  {}", paint(row, "2")),
+        }
+    }
+}
+
+fn print_footer(report: &ctx_code::metrics::MetricsReport, database: &Path) {
+    let projects = if report.scope == "global" && !report.by_project.is_empty() {
+        format!(
+            ", {} {}",
+            report.by_project.len(),
+            if report.by_project.len() == 1 {
+                "project"
+            } else {
+                "projects"
+            }
+        )
+    } else {
+        String::new()
+    };
+    print_row("Metrics file", format!("{}{projects}", database.display()));
+    print_row(
+        "Other views",
+        "ctx gain --project, --since-days 7, --json".to_owned(),
+    );
+    print_row("Help", "ctx --help".to_owned());
+}
+
+fn print_row(label: &str, value: String) {
+    println!("  {} {value}", paint(format!("{label:<LABEL_WIDTH$}"), "2"));
+}
+
+/// A note wrapped to the dashboard width, dimmed.
+fn print_note(text: &str) {
+    // A non-breaking space keeps a command on one line; it prints as a space.
+    for line in wrap(text, DASHBOARD_WIDTH - 2) {
+        println!("  {}", paint(line.replace('\u{a0}', " "), "2"));
+    }
+}
+
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ').filter(|word| !word.is_empty()) {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// `[####....] 96.2%` for a share in percent; a negative share stays empty.
+fn share_bar(percent: f64, width: usize) -> String {
+    let color = if percent < 0.0 { "33" } else { "32" };
+    format!(
+        "{} {}",
+        paint(bar(percent, width), color),
+        paint(format!("{percent:.1}%"), "2")
+    )
+}
+
+fn bar(percent: f64, width: usize) -> String {
+    let filled = (width as f64 * percent.clamp(0.0, 100.0) / 100.0).round() as usize;
+    format!(
+        "{}{}",
+        "#".repeat(filled),
+        ".".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn group_digits(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 fn operation_name(value: &str) -> &str {
@@ -1449,33 +1556,6 @@ fn format_duration(milliseconds: u64) -> String {
     } else {
         format!("{milliseconds}ms")
     }
-}
-
-fn efficiency_meter(percent: Option<f64>) -> String {
-    let width = 36;
-    let Some(percent) = percent else {
-        return format!("[{}] n/a", ".".repeat(width));
-    };
-    let bounded = percent.clamp(0.0, 100.0);
-    let filled = (width as f64 * bounded / 100.0).round() as usize;
-    format!(
-        "[{}{}] {:.1}%",
-        "#".repeat(filled),
-        ".".repeat(width.saturating_sub(filled)),
-        percent
-    )
-}
-
-fn impact_bar(percent: Option<f64>, width: usize) -> String {
-    let Some(percent) = percent else {
-        return format!("[{}]", ".".repeat(width));
-    };
-    let filled = (width as f64 * percent.clamp(0.0, 100.0) / 100.0).round() as usize;
-    format!(
-        "[{}{}]",
-        "#".repeat(filled),
-        ".".repeat(width.saturating_sub(filled))
-    )
 }
 
 fn parse_range(value: &str) -> Result<(usize, usize), String> {

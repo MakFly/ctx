@@ -13,6 +13,15 @@ pub fn stdout(text: impl AsRef<str>, code: u8) -> String {
     paint(text.as_ref(), code, stdout_enabled())
 }
 
+/// Like [`stdout`] with several SGR codes, such as `"1;32"` for bold green.
+pub fn stdout_codes(text: impl AsRef<str>, codes: &str) -> String {
+    if stdout_enabled() {
+        format!("\x1b[{codes}m{}\x1b[0m", text.as_ref())
+    } else {
+        text.as_ref().to_owned()
+    }
+}
+
 pub fn stderr(text: impl AsRef<str>, code: u8) -> String {
     paint(text.as_ref(), code, stderr_enabled())
 }
