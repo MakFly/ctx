@@ -30,6 +30,10 @@
 
 ### Changed
 
+- `ctx gain` opens on the one figure that matters (tokens kept out, or
+  measured savings) with a single bar, then aligned rows, operations sorted by
+  what they kept out, notes wrapped to 72 columns, and no unknown-cost line or
+  row numbers.
 - `ctx gain` no longer presents an estimate as a saving: estimates show as
   context avoided against whole cited files, without a percentage or the
   efficiency meter, and measured pairs are reported apart, negative included.

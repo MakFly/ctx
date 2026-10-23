@@ -47,7 +47,7 @@ fn dashboard_entrypoints_explain_missing_metrics_without_creating_an_index() {
     assert!(help.contains("Usage:"));
     assert!(help.contains("Commands:"));
     assert!(help.contains("gain"));
-    assert!(!help.contains("CTX Token Savings"));
+    assert!(!help.contains("No usage recorded"));
     assert!(!root.join("index").exists());
     assert!(!root.join("global").exists());
     let mut previous = None;
@@ -56,9 +56,9 @@ fn dashboard_entrypoints_explain_missing_metrics_without_creating_an_index() {
         assert!(output.status.success());
         assert!(output.stderr.is_empty());
         let text = String::from_utf8(output.stdout).unwrap();
-        assert!(text.contains("CTX Token Savings (Global Scope)"));
+        assert!(text.starts_with("ctx gain  global, last 30 days\n"));
         assert!(text.contains("No usage recorded in the last 30 days."));
-        assert!(text.contains("No metrics file exists at the path above."));
+        assert!(text.contains("No metrics file exists at the path below."));
         assert!(text.contains(&root.join("global/metrics.sqlite").display().to_string()));
         assert!(text.contains("ctx --help"));
         assert!(!text.contains('\x1b'));
@@ -111,18 +111,19 @@ fn gain_reports_recorded_events_and_preserves_metrics_json() {
     let output = metrics_cli(root).arg("gain").output().unwrap();
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("Last 30 days"));
-    assert!(text.contains("Total commands:          1\n"));
+    assert!(text.contains("last 30 days"));
+    assert!(text.contains("  Calls           1  in "));
     let line = text
         .lines()
-        .find(|line| line.starts_with("Context avoided vs whole files (estimate)"))
+        .find(|line| line.ends_with("tokens kept out of context, estimated"))
         .unwrap();
-    assert!(line.ends_with(" 192"));
-    assert!(!line.contains('%'));
-    assert!(!text.contains("Efficiency meter"));
+    assert!(line.starts_with("  192  "), "{line}");
+    assert!(text.contains("out of 256 tokens in the files ctx cited"));
+    assert!(text.contains(" 75.0%\n"));
+    assert!(!text.contains("input tokens saved"));
     assert!(!text.contains("Est. tokens saved"));
     assert!(text.contains("ctx_pack"));
-    assert!(text.contains("they are not a measured reduction in model usage."));
+    assert!(text.contains("not a measured reduction in model usage."));
 
     let mut previous = None;
     for arguments in [
@@ -183,13 +184,11 @@ fn import_bench_reports_negative_measured_savings_and_is_idempotent() {
     // baseline 2 x 1100, ctx 1300 + 1400: ctx used 500 more (-22.7%).
     let line = text
         .lines()
-        .find(|line| line.starts_with("Tokens saved:"))
+        .find(|line| line.ends_with("more input tokens with ctx"))
         .unwrap();
-    assert!(
-        line.contains("-500 (-22.7%, measured: ctx used more)"),
-        "{line}"
-    );
-    assert!(text.contains("[....................................] -22.7%"));
+    assert!(line.starts_with("  500  "), "{line}");
+    assert!(text.contains("against 2.2K input tokens without ctx, measured over 2 pairs"));
+    assert!(text.contains(&format!("  {} -22.7%\n", ".".repeat(40))));
 
     let output = metrics_cli(root).args(["gain", "--json"]).output().unwrap();
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -209,7 +208,7 @@ fn gain_project_view_identifies_its_metrics_directory() {
         .unwrap();
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert!(text.contains("Project Scope"));
+    assert!(text.starts_with("ctx gain  this project, last 7 days\n"));
     assert!(text.contains("No usage recorded in the last 7 days."));
     assert!(text.contains(&root.join("index/metrics.sqlite").display().to_string()));
     assert!(text.contains("Check CTX_DIR"));
