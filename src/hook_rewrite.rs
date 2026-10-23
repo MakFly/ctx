@@ -74,7 +74,17 @@ fn rewrite_search_pipeline(command: &str) -> Option<String> {
     if !is_search(program, arguments) || !filters.iter().all(|stage| is_line_filter(stage)) {
         return None;
     }
-    Some(format!("{} | ctx compact", command.trim()))
+    let command = command.trim();
+    // `-H` prints the path even for a single file, so the lines parse and the
+    // source around them can be appended.
+    let command = match program.as_str() {
+        "rg" | "grep" => match command.strip_prefix(program.as_str()) {
+            Some(rest) if rest.starts_with([' ', '\t']) => format!("{program} -H{rest}"),
+            _ => command.to_owned(),
+        },
+        _ => command.to_owned(),
+    };
+    Some(format!("{command} | ctx compact"))
 }
 
 /// Splits a command list on unquoted `;` and `&&`, keeping each separator (with
@@ -399,6 +409,42 @@ pub fn post_tool_response(payload: &Value, harness: &str) -> Option<Value> {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok());
+    // A search of one file prints bare `line:text`; name the file so the lines
+    // parse and the source around them can be appended.
+    let single = payload
+        .pointer("/tool_input/path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .map(|path| match &root {
+            Some(root) if path.is_relative() => root.join(path),
+            _ => path,
+        })
+        .filter(|path| path.is_file());
+    let named;
+    let content = match &single {
+        Some(file) => {
+            let shown = root
+                .as_deref()
+                .and_then(|root| file.strip_prefix(root).ok())
+                .unwrap_or(file)
+                .to_string_lossy()
+                .into_owned();
+            named = content
+                .lines()
+                .map(|line| {
+                    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+                    if digits > 0 && matches!(line.as_bytes().get(digits), Some(b':' | b'-')) {
+                        format!("{shown}:{line}")
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            named.as_str()
+        }
+        None => content,
+    };
     let options = crate::compact::CompactOptions {
         expand_tokens: EXPAND_TOKENS,
         root,
@@ -451,14 +497,23 @@ mod tests {
         ] {
             assert_eq!(
                 rewrite_command(command, cwd).as_deref(),
-                Some(format!("{command} | ctx compact").as_str()),
+                Some(
+                    format!(
+                        "{} | ctx compact",
+                        command
+                            .replacen("rg ", "rg -H ", 1)
+                            .replacen("grep -rn", "grep -H -rn", 1)
+                            .replacen("git grep -H -rn", "git grep -rn", 1)
+                    )
+                    .as_str()
+                ),
                 "{command}"
             );
         }
         fs::create_dir_all(cwd.join("src")).unwrap();
         assert_eq!(
             rewrite_command("cd src && rg -n foo", cwd).unwrap(),
-            "cd src && rg -n foo | ctx compact"
+            "cd src && rg -H -n foo | ctx compact"
         );
     }
 
@@ -480,7 +535,7 @@ mod tests {
             "rg foo && rm -rf x | tee y > z",
             "rg $(echo foo)",
             "rg 'unterminated",
-            "rg foo | ctx compact",
+            "rg -H foo | ctx compact",
             "sed -n '1,40p' src/a.rs",
             "ls | head",
             "",
@@ -497,11 +552,11 @@ mod tests {
         let cwd = dir.path();
         assert_eq!(
             rewrite_command("sed -n '1,20p' a.rs; rg -n foo src", cwd).unwrap(),
-            "sed -n '1,20p' a.rs; rg -n foo src | ctx compact"
+            "sed -n '1,20p' a.rs; rg -H -n foo src | ctx compact"
         );
         assert_eq!(
             rewrite_command("rg -n a && rg -n b | head -5", cwd).unwrap(),
-            "rg -n a | ctx compact && rg -n b | head -5 | ctx compact"
+            "rg -H -n a | ctx compact && rg -H -n b | head -5 | ctx compact"
         );
         assert!(rewrite_command("sed -n '1,2p' a; ls", cwd).is_none());
         assert!(rewrite_command("rg a; rm x > y", cwd).is_none());
@@ -562,6 +617,17 @@ mod tests {
             content.contains("around the matches:\n## a.ts 1-3\n1\tone\n"),
             "{content}"
         );
+        // A search of one file prints bare `line:text`: the file is named from the input.
+        let one = json!({"tool_name": "Grep", "cwd": dir.path(), "tool_input": {"path": "a.ts"},
+            "tool_response": {"mode": "content", "content": "2:two", "numLines": 1}});
+        let out = post_tool_response(&one, "claude").unwrap();
+        let content = out["hookSpecificOutput"]["updatedToolOutput"]["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            content.starts_with("a.ts\n2:two\naround the matches:\n## a.ts 1-3\n"),
+            "{content}"
+        );
     }
 
     #[test]
@@ -574,7 +640,7 @@ mod tests {
         let claude = hook_response(&payload, "claude").unwrap();
         assert_eq!(
             claude["hookSpecificOutput"]["updatedInput"]["command"],
-            "rg -n foo | ctx compact"
+            "rg -H -n foo | ctx compact"
         );
         assert_eq!(
             claude["hookSpecificOutput"]["updatedInput"]["description"],
