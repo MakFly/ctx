@@ -657,3 +657,35 @@ fn cli_exposes_literal_regex_and_unicode_case_options() {
         assert_eq!(value["hits"][0]["path"], "notes.custom");
     }
 }
+
+#[test]
+fn read_raw_lines_match_the_file_and_outline_lists_definitions() {
+    let (_temporary, root) = fixture();
+    let expected = fs::read_to_string(root.join("auth.py"))
+        .unwrap()
+        .split_inclusive('\n')
+        .take(3)
+        .collect::<String>();
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(&root)
+        .args(["read", "auth.py", "--lines", "1:3", "--raw"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+
+    let output = Command::cargo_bin("ctx")
+        .unwrap()
+        .current_dir(&root)
+        .args(["read", "auth.py", "--outline"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("AuthService.login"), "{text}");
+}

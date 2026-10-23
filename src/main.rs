@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,7 @@ use ctx_code::indexer::IndexProgress;
 use ctx_code::map::build_map;
 use ctx_code::model::Envelope;
 use ctx_code::pack::pack_query;
+use ctx_code::read::{ReadOptions, read_file, render_read_notes, render_read_text};
 use ctx_code::runner::{RunOptions, run_question};
 use ctx_code::search::search_index_with_options;
 use serde::Serialize;
@@ -160,6 +161,22 @@ enum Command {
     Metrics {
         #[command(subcommand)]
         command: MetricsCommand,
+    },
+    /// Read a file, a line range or one definition, within a token budget.
+    Read {
+        path: String,
+        #[arg(long, value_parser = parse_range)]
+        lines: Option<(usize, usize)>,
+        #[arg(long)]
+        symbol: Option<String>,
+        #[arg(long)]
+        outline: bool,
+        #[arg(long, default_value_t = 2_000)]
+        budget_tokens: usize,
+        #[arg(long)]
+        raw: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Receive a harness lifecycle event and enqueue background work.
     Hook {
@@ -848,6 +865,25 @@ async fn execute(cli: Cli) -> Result<()> {
         }
         Command::Cache { command } => execute_cache(command),
         Command::Metrics { command } => execute_metrics(command),
+        Command::Read {
+            path,
+            lines,
+            symbol,
+            outline,
+            budget_tokens,
+            raw,
+            json,
+        } => execute_read(
+            &path,
+            ReadOptions {
+                lines,
+                symbol,
+                outline,
+                budget_tokens,
+                raw,
+            },
+            json,
+        ),
         Command::Hook { command } => execute_hook(command),
         Command::Embeddings { command } => execute_embeddings(command),
         Command::Lsp { command } => execute_lsp(command).await,
@@ -1283,6 +1319,36 @@ fn impact_bar(percent: Option<f64>, width: usize) -> String {
         "#".repeat(filled),
         ".".repeat(width.saturating_sub(filled))
     )
+}
+
+fn parse_range(value: &str) -> Result<(usize, usize), String> {
+    let number = |text: &str| {
+        text.trim()
+            .parse::<usize>()
+            .map_err(|_| format!("invalid line range `{value}`: expected A:B or A"))
+    };
+    match value.split_once(':') {
+        Some((start, end)) => Ok((number(start)?, number(end)?)),
+        None => number(value).map(|line| (line, line)),
+    }
+}
+
+fn execute_read(path: &str, options: ReadOptions, as_json: bool) -> Result<()> {
+    let output = read_file(Path::new(path), &options)?;
+    if as_json {
+        let text = if io::stdout().is_terminal() {
+            serde_json::to_string_pretty(&output)?
+        } else {
+            serde_json::to_string(&output)?
+        };
+        println!("{text}");
+        return Ok(());
+    }
+    print!("{}", render_read_text(&output, options.raw));
+    if options.raw {
+        eprint!("{}", render_read_notes(&output));
+    }
+    Ok(())
 }
 
 fn execute_hook(command: HookCommand) -> Result<()> {

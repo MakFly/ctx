@@ -13,6 +13,7 @@ pub mod metrics;
 pub mod model;
 pub mod pack;
 pub mod parser;
+pub mod read;
 pub mod reindex;
 pub mod runner;
 pub mod search;
