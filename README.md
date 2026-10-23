@@ -149,14 +149,15 @@ and output over 16 MB or not in UTF-8 go out byte for byte, as the search wrote
 them. One limit remains: a file name holding a newline cannot be told apart in
 line-based output; such a line is shown as is, unattributed.
 
-`ctx install --target claude` adds the hook to `.claude/settings.json`, with a
-PostToolUse hook (`ctx hook compact-output`) that compacts Claude's own Grep
-results the same way. For Codex, add it to `~/.codex/hooks.json`:
-
-```json
-{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [
-  { "type": "command", "command": "ctx hook rewrite --harness codex" } ] } ] } }
-```
+`ctx hook install` adds the hooks for every installed harness, in its user
+configuration: `~/.claude/settings.json` (this hook, plus a PostToolUse hook,
+`ctx hook compact-output`, that compacts Claude's own Grep results the same
+way), `~/.codex/hooks.json` and `~/.grok/hooks/ctx.json`. `--harness
+claude|codex|grok` picks one, `--home DIR` another home. It keeps every other
+key and hook, and adds nothing twice. `ctx hook uninstall` takes the same
+options and removes exactly ctx's hook entries. Codex asks you to trust a new
+hook at its next start. `ctx install --target claude` adds the same Claude
+hooks to the project's `.claude/settings.json`.
 
 Codex applies a rewrite only with an explicit allow, so the hook allows the
 rewritten command: it only ever contains the checked steps above, and a `cd`

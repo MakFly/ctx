@@ -147,11 +147,13 @@ fn add(config: &mut Map<String, Value>, hooks: &[Hook], path: &Path) -> Result<b
                     path.display()
                 )
             })?;
+        // Present only under the same matcher: elsewhere it would not fire on this tool.
         let present = entries.iter().any(|entry| {
-            entry
-                .get("hooks")
-                .and_then(Value::as_array)
-                .is_some_and(|nested| nested.iter().any(|value| is_ours(value, hook.command)))
+            entry.get("matcher").and_then(Value::as_str) == Some(hook.matcher)
+                && entry
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|nested| nested.iter().any(|value| is_ours(value, hook.command)))
         });
         if !present {
             entries.push(json!({
@@ -185,7 +187,12 @@ fn remove(config: &mut Map<String, Value>, hooks: &[Hook]) -> bool {
                 return true;
             }
             removed = true;
-            !nested.is_empty()
+            let empty = nested.is_empty();
+            // An entry carrying more than its matcher and hooks keeps those fields.
+            !empty
+                || entry.as_object().is_some_and(|fields| {
+                    fields.keys().any(|key| key != "matcher" && key != "hooks")
+                })
         });
         if entries.is_empty() {
             object.remove(hook.event);
@@ -291,6 +298,41 @@ mod tests {
             apply(home.path(), "claude", true).unwrap()[0].change,
             Change::Absent
         );
+    }
+
+    #[test]
+    fn install_checks_the_matcher_and_uninstall_keeps_extra_entry_fields() {
+        let home = tempfile::tempdir().unwrap();
+        let hooks = home.path().join(".codex/hooks.json");
+        fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+        fs::write(
+            &hooks,
+            json!({"hooks": {"PreToolUse": [{"matcher": "Read",
+                "hooks": [{"type": "command", "command": "ctx hook rewrite --harness codex"}]}]}})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            apply(home.path(), "codex", false).unwrap()[0].change,
+            Change::Added
+        );
+        let entries = read(&hooks)["hooks"]["PreToolUse"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(entries[1]["matcher"], "Bash");
+
+        fs::write(
+            &hooks,
+            json!({"hooks": {"PreToolUse": [{"matcher": "Bash", "note": "mine",
+                "hooks": [{"type": "command", "command": "ctx hook rewrite --harness codex"}]}]}})
+            .to_string(),
+        )
+        .unwrap();
+        apply(home.path(), "codex", true).unwrap();
+        let left = read(&hooks);
+        assert_eq!(left["hooks"]["PreToolUse"][0]["note"], "mine");
+        assert_eq!(left["hooks"]["PreToolUse"][0]["hooks"], json!([]));
     }
 
     #[test]
